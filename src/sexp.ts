@@ -38,6 +38,9 @@ export function readAll(source: string): Sexp[] {
     }
     if (tok === ")") throw new Error("unexpected )");
     if (tok === "'") return [sym("quote"), next()];
+    if (tok === "`") return [sym("quasiquote"), next()];
+    if (tok === ",@") return [sym("unquote-splicing"), next()];
+    if (tok === ",") return [sym("unquote"), next()];
     return atom(tok);
   };
   while (pos < tokens.length) forms.push(next());
@@ -59,7 +62,15 @@ function tokenize(src: string): string[] {
       while (i < src.length && src[i] !== "\n") i++;
     } else if (/\s/.test(c)) {
       i++;
-    } else if (c === "(" || c === ")" || c === "'") {
+    } else if (c === ",") {
+      if (src[i + 1] === "@") {
+        out.push(",@");
+        i += 2;
+      } else {
+        out.push(",");
+        i++;
+      }
+    } else if (c === "(" || c === ")" || c === "'" || c === "`") {
       out.push(c);
       i++;
     } else if (c === '"') {
@@ -78,7 +89,7 @@ function tokenize(src: string): string[] {
       i = j + 1;
     } else {
       let j = i;
-      while (j < src.length && !/[\s()';"]/.test(src[j])) j++;
+      while (j < src.length && !/[\s()';"`,]/.test(src[j])) j++;
       out.push(src.slice(i, j));
       i = j;
     }
@@ -113,6 +124,7 @@ export function print(x: Sexp): string {
   if (Array.isArray(x)) return "(" + x.map(print).join(" ") + ")";
   if (x instanceof Float32Array) return `#<vec${x.length}>`;
   if (typeof x === "function") return "#<native>";
+  if (typeof x === "object" && x.__macro) return "#<macro>";
   if (typeof x === "object" && x.__closure) return "#<closure>";
   return String(x);
 }

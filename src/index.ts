@@ -1,7 +1,8 @@
 export { Store } from "./store.js";
-export type { Episode, Trace, Link, Recalled } from "./store.js";
+export type { Episode, Trace, Link, Recalled, ConsolidateOptions } from "./store.js";
 export { memoryEnv } from "./memory.js";
-export { evaluate, apply, coreEnv, Env } from "./eval.js";
+export { evaluate, apply, coreEnv, Env, truthy } from "./eval.js";
 export { read, readAll, print, sym, Sym } from "./sexp.js";
 export type { Sexp } from "./sexp.js";
-export { embed, cosine, DIM } from "./embed.js";
+export { hashEmbedder, semanticEmbedder, bestEmbedder, cosine } from "./embed.js";
+export type { Embedder } from "./embed.js";

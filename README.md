@@ -52,22 +52,54 @@ Five principles (one per point):
 
 ```sh
 npm install
-npm run smoke   # end-to-end test: language, memory, graph, replay, persistence
-npm run repl    # interactive; state persists in memory.pgram
+npm run smoke           # end-to-end test: language, macros, memory, graph,
+                        # replay, consolidation, persistence (offline, hash embedder)
+npm run semantic-check  # exercises the real MiniLM embedder (downloads ~25 MB once)
+npm run repl            # interactive; state persists in memory.pgram
+npm run mcp             # MCP server on stdio — pentagram as agent memory
 ```
 
+**Embeddings.** Recall uses all-MiniLM-L6-v2 running locally via
+transformers.js when available (an optional dependency — no API key, model
+cached after first download) and falls back to the zero-dep hash embedder
+otherwise. Embeddings are derived state, cached in a sidecar
+(`<log>.vecs.json`) tagged by embedder — switching embedders just re-derives
+the associative layer.
+
+**MCP.** `npm run mcp` (or `npx tsx src/mcp.ts`) speaks Model Context Protocol
+over stdio with tools `remember`, `recall`, `link`, `hops`, `stats`, and `eval`
+(the full language — the agent protocol *is* the language). Configure with
+`PENTAGRAM_LOG` and `PENTAGRAM_EMBEDDER=semantic|hash`. For Claude Code:
+`claude mcp add pentagram -- npx tsx /path/to/pentagram/src/mcp.ts`.
+
+**Macros.** The language grows itself:
+
+```lisp
+⛧ (defmacro unless (c body) `(if ,c () ,body))
+⛧ (unless false 42)
+42
+```
+
+**Consolidation.** `(consolidate!)` clusters old, similar episodes and
+compresses each cluster into a `fact` carrying provenance — the ids of the
+episodes it summarizes, which stay in the log forever. Sources are tombstoned;
+recall surfaces the fact; `(provenance id)` walks back to the evidence. The v0
+summarizer is extractive; an LLM summarizer plugs in behind the same event
+shape.
+
 The library surface is exported from `src/index.ts` (`Store`, `memoryEnv`,
-`evaluate`, `read`, `print`).
+`evaluate`, `read`, `print`, embedders).
 
 ## Status & roadmap
 
-v0 is a working skeleton, honest about its placeholders:
+v0.2 implements the language (with `defmacro`/quasiquote), the two-layer store,
+semantic recall, reinforcement and decay, consolidation with provenance,
+procedural replay, a REPL, and the MCP server. Still honest about its gaps:
 
-- The embedder is hashed trigrams — deterministic and offline, not semantic.
-  Swap in a real embedding model behind `embed()`.
 - Recall is a full scan. Fine to ~10⁵ episodes; add an ANN index (HNSW) after.
-- The log is a text file. Fine until it isn't; then segment + snapshot +
-  columnar compaction for the analytical tail.
-- Planned: macros (`defmacro`), consolidation (background summarization of
-  episodes into semantic facts — sleep as ETL), provenance-carrying facts,
-  entity layer, multi-tenant isolation.
+- The log is one text file, single-writer. Then: segmentation, snapshots, and
+  columnar (Parquet) compaction of the cold tail for the analytical layer.
+- `replay`/`eval` are unsandboxed — single-user, trusted-agent deployments
+  only until capabilities and resource limits land.
+- Planned next: LLM summarizer for consolidation, entity layer, importance
+  scoring in recall, multi-tenant isolation.

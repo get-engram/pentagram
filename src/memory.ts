@@ -8,7 +8,8 @@ import { Sexp, print } from "./sexp.js";
 
 export function memoryEnv(store: Store): Env {
   const env = coreEnv();
-  const def = (name: string, fn: (...args: Sexp[]) => Sexp) => env.define(name, fn);
+  const def = (name: string, fn: (...args: Sexp[]) => Sexp | Promise<Sexp>) =>
+    env.define(name, fn);
 
   // (remember "took the 27agency call, decided on vercel") -> id
   // (remember '(lambda () (* 6 7)))                        -> id  (stores code)
@@ -16,9 +17,8 @@ export function memoryEnv(store: Store): Env {
 
   // (recall "what did we decide about hosting" 3)
   // -> ((id score "content") ...) ; recalling reinforces.
-  def("recall", (query, n) =>
-    store
-      .recall(String(query), typeof n === "number" ? n : 5)
+  def("recall", async (query, n) =>
+    (await store.recall(String(query), typeof n === "number" ? n : 5))
       .map((r) => [r.id, round(r.score), r.episode.text]));
 
   // (link id1 'about id2)
@@ -40,6 +40,13 @@ export function memoryEnv(store: Store): Env {
     return ep.content;
   });
 
+  // (provenance id) -> for facts, the episode ids it was consolidated from
+  def("provenance", (id) => {
+    const ep = store.get(String(id));
+    if (!ep) throw new Error(`no episode ${id}`);
+    return ep.provenance ?? [];
+  });
+
   // (replay id) -> evaluate the stored expression. Memory as program.
   def("replay", (id) => {
     const ep = store.get(String(id));
@@ -50,7 +57,10 @@ export function memoryEnv(store: Store): Env {
   // (decay!) -> ids tombstoned this pass
   def("decay!", () => store.decay());
 
-  // (stats) -> ((episodes n) (live n) (forgotten n) (links n))
+  // (consolidate!) -> ids of facts created (sleep as ETL)
+  def("consolidate!", () => store.consolidate());
+
+  // (stats) -> ((episodes n) (facts n) (live n) (forgotten n) (links n) (embedder name))
   def("stats", () => {
     const s = store.stats();
     return Object.entries(s).map(([k, v]) => [k, v]);

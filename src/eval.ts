@@ -1,7 +1,11 @@
-// A small Lisp evaluator. The same evaluator runs user queries at the REPL
-// and replays stored procedural memories — there is only one language here.
+// A small Lisp evaluator. The same evaluator runs user queries at the REPL,
+// serves the MCP agent protocol, and replays stored procedural memories —
+// there is only one language here.
+//
+// Async throughout: memory operations (embedding, recall) return promises,
+// and the evaluator awaits natives transparently.
 
-import { Sexp, Sym, sym, print } from "./sexp.js";
+import { Sexp, Sym, print } from "./sexp.js";
 
 export class Env {
   private vars = new Map<string, Sexp>();
@@ -11,6 +15,10 @@ export class Env {
     if (this.vars.has(name)) return this.vars.get(name);
     if (this.parent) return this.parent.get(name);
     throw new Error(`unbound symbol: ${name}`);
+  }
+  tryGet(name: string): Sexp | undefined {
+    if (this.vars.has(name)) return this.vars.get(name);
+    return this.parent?.tryGet(name);
   }
   define(name: string, value: Sexp): Sexp {
     this.vars.set(name, value);
@@ -33,7 +41,12 @@ interface Closure {
   env: Env;
 }
 
-export function evaluate(expr: Sexp, env: Env): Sexp {
+interface Macro {
+  __macro: true;
+  closure: Closure;
+}
+
+export async function evaluate(expr: Sexp, env: Env): Promise<Sexp> {
   if (expr instanceof Sym) return env.get(expr.name);
   if (!Array.isArray(expr)) return expr; // self-evaluating atom
   if (expr.length === 0) return [];
@@ -43,8 +56,10 @@ export function evaluate(expr: Sexp, env: Env): Sexp {
     switch (head.name) {
       case "quote":
         return expr[1];
+      case "quasiquote":
+        return quasi(expr[1], env);
       case "if":
-        return truthy(evaluate(expr[1], env))
+        return truthy(await evaluate(expr[1], env))
           ? evaluate(expr[2], env)
           : expr.length > 3
             ? evaluate(expr[3], env)
@@ -56,16 +71,25 @@ export function evaluate(expr: Sexp, env: Env): Sexp {
           const [name, ...params] = target as Sym[];
           return env.define(name.name, makeClosure(params, expr.slice(2), env));
         }
-        return env.define((target as Sym).name, evaluate(expr[2], env));
+        return env.define((target as Sym).name, await evaluate(expr[2], env));
+      }
+      case "defmacro": {
+        // (defmacro name (params...) body...) — the body receives UNevaluated
+        // argument forms and returns a form, which is then evaluated. Code
+        // that writes code: the language grows itself from inside.
+        const name = expr[1] as Sym;
+        const closure = makeClosure(expr[2] as Sym[], expr.slice(3), env);
+        const macro: Macro = { __macro: true, closure };
+        return env.define(name.name, macro);
       }
       case "set!":
-        return env.set((expr[1] as Sym).name, evaluate(expr[2], env));
+        return env.set((expr[1] as Sym).name, await evaluate(expr[2], env));
       case "lambda":
         return makeClosure(expr[1] as Sym[], expr.slice(2), env);
       case "let": {
         const inner = new Env(env);
         for (const [name, value] of expr[1] as [Sym, Sexp][]) {
-          inner.define(name.name, evaluate(value, inner));
+          inner.define(name.name, await evaluate(value, inner));
         }
         return evalBody(expr.slice(2), inner);
       }
@@ -74,28 +98,36 @@ export function evaluate(expr: Sexp, env: Env): Sexp {
       case "and": {
         let v: Sexp = true;
         for (const e of expr.slice(1)) {
-          v = evaluate(e, env);
+          v = await evaluate(e, env);
           if (!truthy(v)) return v;
         }
         return v;
       }
       case "or": {
         for (const e of expr.slice(1)) {
-          const v = evaluate(e, env);
+          const v = await evaluate(e, env);
           if (truthy(v)) return v;
         }
         return false;
       }
     }
+
+    // Macro expansion: apply to unevaluated args, then evaluate the expansion.
+    const binding = env.tryGet(head.name);
+    if (binding && binding.__macro) {
+      const expansion = await apply((binding as Macro).closure, expr.slice(1));
+      return evaluate(expansion, env);
+    }
   }
 
-  const fn = evaluate(head, env);
-  const args = expr.slice(1).map((a) => evaluate(a, env));
+  const fn = await evaluate(head, env);
+  const args: Sexp[] = [];
+  for (const a of expr.slice(1)) args.push(await evaluate(a, env));
   return apply(fn, args);
 }
 
-export function apply(fn: Sexp, args: Sexp[]): Sexp {
-  if (typeof fn === "function") return fn(...args);
+export async function apply(fn: Sexp, args: Sexp[]): Promise<Sexp> {
+  if (typeof fn === "function") return await fn(...args);
   if (fn && fn.__closure) {
     const c = fn as Closure;
     const inner = new Env(c.env);
@@ -105,13 +137,29 @@ export function apply(fn: Sexp, args: Sexp[]): Sexp {
   throw new Error(`not callable: ${print(fn)}`);
 }
 
+// `(a ,x ,@xs) — template with holes. Single-level (no nested quasiquote).
+async function quasi(x: Sexp, env: Env): Promise<Sexp> {
+  if (!Array.isArray(x)) return x;
+  if (x[0] instanceof Sym && x[0].name === "unquote") return evaluate(x[1], env);
+  const out: Sexp[] = [];
+  for (const item of x) {
+    if (Array.isArray(item) && item[0] instanceof Sym && item[0].name === "unquote-splicing") {
+      const spliced = await evaluate(item[1], env);
+      out.push(...spliced);
+    } else {
+      out.push(await quasi(item, env));
+    }
+  }
+  return out;
+}
+
 function makeClosure(params: Sym[], body: Sexp[], env: Env): Closure {
   return { __closure: true, params: params.map((p) => p.name), body, env };
 }
 
-function evalBody(body: Sexp[], env: Env): Sexp {
+async function evalBody(body: Sexp[], env: Env): Promise<Sexp> {
   let result: Sexp = [];
-  for (const form of body) result = evaluate(form, env);
+  for (const form of body) result = await evaluate(form, env);
   return result;
 }
 
@@ -123,7 +171,8 @@ export function truthy(x: Sexp): boolean {
 
 export function coreEnv(): Env {
   const env = new Env();
-  const def = (name: string, fn: (...args: Sexp[]) => Sexp) => env.define(name, fn);
+  const def = (name: string, fn: (...args: Sexp[]) => Sexp | Promise<Sexp>) =>
+    env.define(name, fn);
 
   def("+", (...ns) => ns.reduce((a: number, b: number) => a + b, 0));
   def("-", (a, ...ns) => (ns.length ? ns.reduce((x: number, y: number) => x - y, a) : -a));
@@ -139,8 +188,16 @@ export function coreEnv(): Env {
   def("cons", (x, l) => [x, ...l]);
   def("length", (l) => l.length);
   def("nth", (l, i) => l[i]);
-  def("map", (fn, l) => l.map((x: Sexp) => apply(fn, [x])));
-  def("filter", (fn, l) => l.filter((x: Sexp) => truthy(apply(fn, [x]))));
+  def("map", async (fn, l) => {
+    const out: Sexp[] = [];
+    for (const x of l) out.push(await apply(fn, [x]));
+    return out;
+  });
+  def("filter", async (fn, l) => {
+    const out: Sexp[] = [];
+    for (const x of l) if (truthy(await apply(fn, [x]))) out.push(x);
+    return out;
+  });
   def("str", (...xs) =>
     xs.map((x) => (typeof x === "string" ? x : print(x))).join(""));
   def("print", (...xs) => {

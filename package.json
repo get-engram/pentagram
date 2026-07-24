@@ -1,6 +1,6 @@
 {
   "name": "pentagram",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A homoiconic memory substrate: episodic log, associative recall, graph links, and procedural memory in one S-expression language.",
   "type": "module",
   "main": "dist/index.js",
@@ -8,9 +8,14 @@
   "scripts": {
     "build": "tsc",
     "repl": "tsx src/repl.ts",
-    "smoke": "tsx scripts/smoke.ts"
+    "mcp": "tsx src/mcp.ts",
+    "smoke": "tsx scripts/smoke.ts",
+    "semantic-check": "tsx scripts/semantic-check.ts"
   },
   "license": "MIT",
+  "optionalDependencies": {
+    "@huggingface/transformers": "^3.0.0"
+  },
   "devDependencies": {
     "@types/node": "^20.19.0",
     "tsx": "^4.19.0",
