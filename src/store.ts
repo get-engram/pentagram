@@ -16,13 +16,14 @@ import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Sexp, Sym, sym, readAll, print } from "./sexp.js";
 import { Embedder, hashEmbedder, cosine } from "./embed.js";
+import { Summarizer, extractiveSummarizer } from "./summarize.js";
 
 export interface Episode {
   id: string;
   ts: number;
   content: Sexp; // string atom or arbitrary expression (procedural memory)
   text: string; // printed form, used for embedding
-  kind: "episode" | "fact";
+  kind: "episode" | "fact" | "entity";
   provenance?: string[]; // for facts: the episode ids consolidated into it
   forgotten: boolean;
 }
@@ -49,26 +50,32 @@ export interface ConsolidateOptions {
   minAgeHours?: number; // only episodes at least this old are candidates
   threshold?: number; // cosine similarity to join a cluster
   now?: number;
+  summarizer?: Summarizer; // defaults to extractive; claudeSummarizer for real compression
 }
 
 const HALF_LIFE_HOURS = 24 * 30; // recency halves every 30 days
 const REINFORCE_WEIGHT = 0.25; // each recall adds 25% strength
-const SUMMARY_MAX_CHARS = 600;
 
 export class Store {
   private episodes = new Map<string, Episode>();
   private traces = new Map<string, Trace>();
   private links: Link[] = [];
   private vecs = new Map<string, Float32Array>();
+  private entityIds = new Map<string, string>(); // "name|kind" -> id
 
   private constructor(
     private path: string,
     readonly embedder: Embedder,
+    readonly summarizer: Summarizer,
   ) {}
 
   /** Open (or create) a store: fold the log, then derive/restore embeddings. */
-  static async open(path: string, embedder: Embedder = hashEmbedder): Promise<Store> {
-    const s = new Store(path, embedder);
+  static async open(
+    path: string,
+    embedder: Embedder = hashEmbedder,
+    summarizer: Summarizer = extractiveSummarizer,
+  ): Promise<Store> {
+    const s = new Store(path, embedder, summarizer);
     if (fs.existsSync(path)) {
       for (const event of readAll(fs.readFileSync(path, "utf8"))) s.fold(event);
     }
@@ -102,6 +109,16 @@ export class Store {
           provenance: provenance as string[], forgotten: false,
         });
         this.traces.set(id, { recallCount: 0, lastAccess: ts });
+        break;
+      }
+      case "entity": {
+        const [id, ts, name, kind] = rest;
+        const kindName = kind instanceof Sym ? kind.name : String(kind);
+        this.episodes.set(id, {
+          id, ts, content: name, text: `${name} (${kindName})`, kind: "entity", forgotten: false,
+        });
+        this.traces.set(id, { recallCount: 0, lastAccess: ts });
+        this.entityIds.set(`${name}|${kindName}`, id);
         break;
       }
       case "link": {
@@ -176,6 +193,19 @@ export class Store {
     this.append([sym("link"), src, sym(rel), dst]);
   }
 
+  // Entities are first-class memories: recallable (they embed like anything
+  // else), traversable (link episodes to them), and deduplicated by name+kind
+  // so every mention converges on one node in the graph.
+  async entity(name: string, kind = "thing", ts = Date.now()): Promise<string> {
+    const existing = this.entityIds.get(`${name}|${kind}`);
+    if (existing) return existing;
+    const id = randomUUID().slice(0, 8);
+    this.append([sym("entity"), id, ts, name, sym(kind)]);
+    this.vecs.set(id, await this.embedder.embed(this.episodes.get(id)!.text));
+    this.saveVecCache();
+    return id;
+  }
+
   // Observation is a write: recalling a memory reinforces it. The recall
   // events land in the same append-only log as everything else.
   async recall(query: string, n = 5, now = Date.now()): Promise<Recalled[]> {
@@ -223,6 +253,7 @@ export class Store {
     const forgotten: string[] = [];
     for (const ep of this.episodes.values()) {
       if (ep.forgotten) continue;
+      if (ep.kind === "entity") continue; // entities persist; only experiences fade
       const t = this.traces.get(ep.id)!;
       const ageHours = (now - t.lastAccess) / 3_600_000;
       const strength = (1 + REINFORCE_WEIGHT * t.recallCount) * Math.pow(0.5, ageHours / HALF_LIFE_HOURS);
@@ -240,7 +271,12 @@ export class Store {
   // is extractive and dumb by design; an LLM summarizer plugs in behind the
   // same event shape without changing the log format.
   async consolidate(opts: ConsolidateOptions = {}): Promise<string[]> {
-    const { minAgeHours = 24 * 7, threshold = 0.55, now = Date.now() } = opts;
+    const {
+      minAgeHours = 24 * 7,
+      threshold = 0.55,
+      now = Date.now(),
+      summarizer = this.summarizer,
+    } = opts;
     const candidates = [...this.episodes.values()].filter(
       (e) => !e.forgotten && e.kind === "episode" && now - e.ts >= minAgeHours * 3_600_000,
     );
@@ -260,8 +296,7 @@ export class Store {
 
       for (const e of cluster) clustered.add(e.id);
       const ids = cluster.map((e) => e.id);
-      const summary = (`consolidated from ${cluster.length} episodes: ` +
-        cluster.map((e) => e.text).join(" | ")).slice(0, SUMMARY_MAX_CHARS);
+      const summary = await summarizer(cluster.map((e) => e.text));
 
       const factId = randomUUID().slice(0, 8);
       this.append([sym("fact"), factId, now, summary, ids]);
@@ -287,6 +322,7 @@ export class Store {
     return {
       episodes: all.filter((e) => e.kind === "episode").length,
       facts: all.filter((e) => e.kind === "fact").length,
+      entities: all.filter((e) => e.kind === "entity").length,
       live: live.length,
       forgotten: all.length - live.length,
       links: this.links.length,

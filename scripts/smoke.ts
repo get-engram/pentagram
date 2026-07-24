@@ -71,13 +71,47 @@ const p = await run(`(remember '(lambda (n) (* n n)))`);
 const sq: any = await run(`((replay "${p}") 9)`);
 assert(sq === 81, "replay evaluates stored code: (f 9) → 81");
 
+console.log("\n— replay is sandboxed —");
+const evil = await run(`(remember '(remember "injected"))`);
+let sandboxed = false;
+try {
+  await run(`(replay "${evil}")`);
+} catch (e: any) {
+  sandboxed = /unbound symbol: remember/.test(e.message);
+}
+assert(sandboxed, "(replay id) cannot reach memory ops (language-only env)");
+const escalated = await run(`(replay! "${evil}")`);
+assert(typeof escalated === "string", "(replay! id) deliberately escalates to full access");
+
+console.log("\n— entity layer —");
+const e1 = await run(`(entity "acme corp" 'client)`);
+const e1again = await run(`(entity "acme corp" 'client)`);
+assert(e1 === e1again, "entities dedupe by name+kind (one graph node per entity)");
+await run(`(mention "${a}" "${e1}")`);
+const entHops: any = await run(`(hops "${e1}" 1)`);
+assert(
+  entHops.some((h: any) => h[0] === a),
+  "one hop from the entity reaches the episode that mentions it",
+);
+const entRecall: any = await run(`(recall "acme" 1)`);
+assert(entRecall[0][0] === e1, "entities are recallable like any memory");
+
 console.log("\n— consolidation: sleep as ETL —");
 // Three near-duplicate old episodes about the same client issue.
 const oldTs = Date.now() - 30 * 24 * 3_600_000;
 const s1 = await store.remember("client reported the checkout page is slow on mobile", oldTs);
 const s2 = await store.remember("client says mobile checkout page loads slowly again", oldTs);
 const s3 = await store.remember("mobile checkout slowness reported by the client once more", oldTs);
-const facts = await store.consolidate({ minAgeHours: 24, threshold: 0.3 });
+const facts = await store.consolidate({
+  minAgeHours: 24,
+  threshold: 0.3,
+  summarizer: async (texts) =>
+    `STUB: client repeatedly reported slow mobile checkout (${texts.length} episodes)`,
+});
+assert(
+  store.get(facts[0])!.text.startsWith("STUB:") && store.get(facts[0])!.text.includes("(3 episodes)"),
+  "consolidation uses the pluggable summarizer",
+);
 console.log(`  facts created: ${print(facts)}`);
 assert(facts.length >= 1, "similar old episodes consolidated into a fact");
 const fact = store.get(facts[0])!;

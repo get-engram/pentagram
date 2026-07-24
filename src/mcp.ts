@@ -15,6 +15,7 @@ import { memoryEnv } from "./memory.js";
 import { evaluate, Env } from "./eval.js";
 import { read, print } from "./sexp.js";
 import { bestEmbedder, hashEmbedder, semanticEmbedder, disposeEmbedder } from "./embed.js";
+import { bestSummarizer, claudeSummarizer, extractiveSummarizer } from "./summarize.js";
 
 const LOG_PATH = process.env.PENTAGRAM_LOG ?? "memory.pgram";
 
@@ -27,7 +28,11 @@ async function ensure(): Promise<Env> {
       process.env.PENTAGRAM_EMBEDDER === "hash" ? hashEmbedder
       : process.env.PENTAGRAM_EMBEDDER === "semantic" ? semanticEmbedder
       : await bestEmbedder();
-    store = await Store.open(LOG_PATH, embedder);
+    const summarizer =
+      process.env.PENTAGRAM_SUMMARIZER === "extractive" ? extractiveSummarizer
+      : process.env.PENTAGRAM_SUMMARIZER === "claude" ? claudeSummarizer()
+      : await bestSummarizer();
+    store = await Store.open(LOG_PATH, embedder, summarizer);
     env = memoryEnv(store);
   }
   return env;
@@ -160,7 +165,7 @@ rl.on("line", async (line) => {
         respond({
           protocolVersion: params?.protocolVersion ?? "2025-06-18",
           capabilities: { tools: {} },
-          serverInfo: { name: "pentagram", version: "0.2.0" },
+          serverInfo: { name: "pentagram", version: "0.3.0" },
         });
         break;
       case "ping":

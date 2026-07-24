@@ -4,5 +4,7 @@ export { memoryEnv } from "./memory.js";
 export { evaluate, apply, coreEnv, Env, truthy } from "./eval.js";
 export { read, readAll, print, sym, Sym } from "./sexp.js";
 export type { Sexp } from "./sexp.js";
-export { hashEmbedder, semanticEmbedder, bestEmbedder, cosine } from "./embed.js";
+export { hashEmbedder, semanticEmbedder, bestEmbedder, disposeEmbedder, cosine } from "./embed.js";
 export type { Embedder } from "./embed.js";
+export { extractiveSummarizer, claudeSummarizer, bestSummarizer } from "./summarize.js";
+export type { Summarizer } from "./summarize.js";

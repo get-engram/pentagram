@@ -83,23 +83,37 @@ over stdio with tools `remember`, `recall`, `link`, `hops`, `stats`, and `eval`
 **Consolidation.** `(consolidate!)` clusters old, similar episodes and
 compresses each cluster into a `fact` carrying provenance — the ids of the
 episodes it summarizes, which stay in the log forever. Sources are tombstoned;
-recall surfaces the fact; `(provenance id)` walks back to the evidence. The v0
-summarizer is extractive; an LLM summarizer plugs in behind the same event
-shape.
+recall surfaces the fact; `(provenance id)` walks back to the evidence.
+Summarizers are pluggable: `extractiveSummarizer` (offline default) or
+`claudeSummarizer` (shells out to the `claude` CLI headless — no SDK, no API
+key handling; uses the CLI's auth). The MCP server auto-selects
+(`PENTAGRAM_SUMMARIZER=claude|extractive` to force).
+
+**Entities.** `(entity "acme corp" 'client)` creates (or returns — deduped by
+name+kind) a first-class graph node: recallable like any memory, immune to
+decay, and connectable with `(mention episode-id entity-id)`. Every mention of
+the same entity converges on one node, so `hops` from an entity walks its
+whole history.
+
+**Sandboxed replay.** `(replay id)` evaluates stored code in a language-only
+environment — no memory operations reachable. `(replay! id)` deliberately
+escalates to full access for trusted code; the `!` is the audit trail in the
+source.
 
 The library surface is exported from `src/index.ts` (`Store`, `memoryEnv`,
 `evaluate`, `read`, `print`, embedders).
 
 ## Status & roadmap
 
-v0.2 implements the language (with `defmacro`/quasiquote), the two-layer store,
-semantic recall, reinforcement and decay, consolidation with provenance,
-procedural replay, a REPL, and the MCP server. Still honest about its gaps:
+v0.3 implements the language (with `defmacro`/quasiquote), the two-layer store,
+semantic recall, reinforcement and decay, LLM-backed consolidation with
+provenance, the entity layer, sandboxed procedural replay, a REPL, and the MCP
+server. Still honest about its gaps:
 
 - Recall is a full scan. Fine to ~10⁵ episodes; add an ANN index (HNSW) after.
 - The log is one text file, single-writer. Then: segmentation, snapshots, and
   columnar (Parquet) compaction of the cold tail for the analytical layer.
-- `replay`/`eval` are unsandboxed — single-user, trusted-agent deployments
-  only until capabilities and resource limits land.
-- Planned next: LLM summarizer for consolidation, entity layer, importance
-  scoring in recall, multi-tenant isolation.
+- The MCP `eval` tool retains full access by design (the agent protocol is the
+  language); `replay` is sandboxed, but multi-tenant isolation does not exist.
+- Planned next: importance scoring in recall, automatic entity extraction at
+  remember time (LLM), scheduled consolidation, ANN index, log segmentation.

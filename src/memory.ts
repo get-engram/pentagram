@@ -47,8 +47,28 @@ export function memoryEnv(store: Store): Env {
     return ep.provenance ?? [];
   });
 
-  // (replay id) -> evaluate the stored expression. Memory as program.
+  // (entity "acme corp" 'client) -> id. Deduplicated by name+kind: every
+  // mention of the same entity converges on one graph node.
+  def("entity", (name, kind) =>
+    store.entity(String(name), kind ? print(kind).replace(/"/g, "") : "thing"));
+
+  // (mention episode-id entity-id) — sugar for a 'mentions link.
+  def("mention", (epId, entId) => {
+    store.link(String(epId), "mentions", String(entId));
+    return [];
+  });
+
+  // (replay id) -> evaluate the stored expression, SANDBOXED: language only,
+  // no memory operations. Stored code cannot remember/link/decay/consolidate.
   def("replay", (id) => {
+    const ep = store.get(String(id));
+    if (!ep) throw new Error(`no episode ${id}`);
+    return evaluate(ep.content, coreEnv());
+  });
+
+  // (replay! id) -> evaluate with full memory access. Trusted code only:
+  // this is deliberate escalation, visible in the source as the ! warns.
+  def("replay!", (id) => {
     const ep = store.get(String(id));
     if (!ep) throw new Error(`no episode ${id}`);
     return evaluate(ep.content, env);
@@ -57,10 +77,12 @@ export function memoryEnv(store: Store): Env {
   // (decay!) -> ids tombstoned this pass
   def("decay!", () => store.decay());
 
-  // (consolidate!) -> ids of facts created (sleep as ETL)
+  // (consolidate!) -> ids of facts created (sleep as ETL). Uses the store's
+  // default summarizer; pass one via Store.consolidate() from the host for
+  // LLM-backed compression (claudeSummarizer).
   def("consolidate!", () => store.consolidate());
 
-  // (stats) -> ((episodes n) (facts n) (live n) (forgotten n) (links n) (embedder name))
+  // (stats) -> ((episodes n) (facts n) (entities n) (live n) (forgotten n) (links n) (embedder name))
   def("stats", () => {
     const s = store.stats();
     return Object.entries(s).map(([k, v]) => [k, v]);
