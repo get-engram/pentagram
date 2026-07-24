@@ -103,17 +103,27 @@ source.
 The library surface is exported from `src/index.ts` (`Store`, `memoryEnv`,
 `evaluate`, `read`, `print`, embedders).
 
+**Scale.** Recall scores `similarity × recency × strength × importance`
+(importance grows with link degree — well-connected memories are load-bearing).
+Small stores use an exact scan; past 2,000 live memories a pure-TypeScript
+HNSW index builds automatically (`npm run bench`: ~4x faster at 5k episodes
+with ~86% top-10 agreement vs exact, and the gap widens with size — scan is
+O(N), HNSW ~O(log N)). The index is derived state like everything else:
+never persisted, rebuilt at need, tombstones filtered at search time.
+
 ## Status & roadmap
 
-v0.3 implements the language (with `defmacro`/quasiquote), the two-layer store,
-semantic recall, reinforcement and decay, LLM-backed consolidation with
-provenance, the entity layer, sandboxed procedural replay, a REPL, and the MCP
-server. Still honest about its gaps:
+v0.4 implements the language (with `defmacro`/quasiquote), the two-layer store,
+semantic recall with importance scoring, reinforcement and decay, LLM-backed
+consolidation with provenance, the entity layer, sandboxed procedural replay,
+automatic HNSW indexing, a REPL, and the MCP server. Still honest about gaps:
 
-- Recall is a full scan. Fine to ~10⁵ episodes; add an ANN index (HNSW) after.
 - The log is one text file, single-writer. Then: segmentation, snapshots, and
   columnar (Parquet) compaction of the cold tail for the analytical layer.
 - The MCP `eval` tool retains full access by design (the agent protocol is the
   language); `replay` is sandboxed, but multi-tenant isolation does not exist.
-- Planned next: importance scoring in recall, automatic entity extraction at
-  remember time (LLM), scheduled consolidation, ANN index, log segmentation.
+- Planned next: automatic entity extraction at remember time (LLM), scheduled
+  consolidation, log segmentation, npm publish.
+
+Pentagram is a standalone open-source framework (MIT): it depends on no
+product, and no product depends on it.

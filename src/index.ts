@@ -8,3 +8,4 @@ export { hashEmbedder, semanticEmbedder, bestEmbedder, disposeEmbedder, cosine }
 export type { Embedder } from "./embed.js";
 export { extractiveSummarizer, claudeSummarizer, bestSummarizer } from "./summarize.js";
 export type { Summarizer } from "./summarize.js";
+export { HNSW } from "./hnsw.js";

@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import { Sexp, Sym, sym, readAll, print } from "./sexp.js";
 import { Embedder, hashEmbedder, cosine } from "./embed.js";
 import { Summarizer, extractiveSummarizer } from "./summarize.js";
+import { HNSW } from "./hnsw.js";
 
 export interface Episode {
   id: string;
@@ -55,6 +56,9 @@ export interface ConsolidateOptions {
 
 const HALF_LIFE_HOURS = 24 * 30; // recency halves every 30 days
 const REINFORCE_WEIGHT = 0.25; // each recall adds 25% strength
+const DEGREE_WEIGHT = 0.15; // importance: well-connected memories rank higher
+const ANN_THRESHOLD = 2000; // below this, exact full scan; above, HNSW
+const ANN_OVERSAMPLE = 8; // fetch n*this from the index before rescoring
 
 export class Store {
   private episodes = new Map<string, Episode>();
@@ -62,6 +66,8 @@ export class Store {
   private links: Link[] = [];
   private vecs = new Map<string, Float32Array>();
   private entityIds = new Map<string, string>(); // "name|kind" -> id
+  private degree = new Map<string, number>(); // link count per id
+  private index: HNSW | null = null; // derived, disposable, built past ANN_THRESHOLD
 
   private constructor(
     private path: string,
@@ -124,6 +130,8 @@ export class Store {
       case "link": {
         const [src, rel, dst] = rest;
         this.links.push({ src, rel: rel instanceof Sym ? rel.name : String(rel), dst });
+        this.degree.set(src, (this.degree.get(src) ?? 0) + 1);
+        this.degree.set(dst, (this.degree.get(dst) ?? 0) + 1);
         break;
       }
       case "recalled": {
@@ -171,6 +179,27 @@ export class Store {
       vecs[id] = Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString("base64");
     }
     fs.writeFileSync(this.vecCachePath(), JSON.stringify({ embedder: this.embedder.name, vecs }));
+    this.cacheDirty = false;
+  }
+
+  private cacheDirty = false;
+  private cacheTimer: NodeJS.Timeout | null = null;
+
+  // The cache is derived state: losing it costs a re-embed, never data.
+  // Debounce writes so bulk ingest is O(n), not O(n²) JSON serialization.
+  private scheduleVecCacheSave(): void {
+    this.cacheDirty = true;
+    if (this.cacheTimer) return;
+    this.cacheTimer = setTimeout(() => {
+      this.cacheTimer = null;
+      if (this.cacheDirty) this.saveVecCache();
+    }, 250);
+    this.cacheTimer.unref?.();
+  }
+
+  /** Force-write the vector cache now (e.g. before process exit). */
+  flush(): void {
+    if (this.cacheDirty) this.saveVecCache();
   }
 
   private async ensureVecs(): Promise<void> {
@@ -179,13 +208,35 @@ export class Store {
     }
   }
 
+  // ---------- ANN index (derived, disposable) ----------
+
+  private liveCount(): number {
+    let n = 0;
+    for (const e of this.episodes.values()) if (!e.forgotten) n++;
+    return n;
+  }
+
+  private ensureIndex(): void {
+    if (this.index || this.liveCount() < ANN_THRESHOLD) return;
+    const idx = new HNSW();
+    for (const ep of this.episodes.values()) {
+      if (!ep.forgotten) idx.insert(ep.id, this.vecs.get(ep.id)!);
+    }
+    this.index = idx;
+  }
+
+  private indexInsert(id: string): void {
+    this.index?.insert(id, this.vecs.get(id)!);
+  }
+
   // ---------- API ----------
 
   async remember(content: Sexp, ts = Date.now()): Promise<string> {
     const id = randomUUID().slice(0, 8);
     this.append([sym("episode"), id, ts, content]);
     this.vecs.set(id, await this.embedder.embed(this.episodes.get(id)!.text));
-    this.saveVecCache();
+    this.indexInsert(id);
+    this.scheduleVecCacheSave();
     return id;
   }
 
@@ -202,23 +253,42 @@ export class Store {
     const id = randomUUID().slice(0, 8);
     this.append([sym("entity"), id, ts, name, sym(kind)]);
     this.vecs.set(id, await this.embedder.embed(this.episodes.get(id)!.text));
-    this.saveVecCache();
+    this.indexInsert(id);
+    this.scheduleVecCacheSave();
     return id;
   }
 
   // Observation is a write: recalling a memory reinforces it. The recall
   // events land in the same append-only log as everything else.
+  //
+  // score = similarity × recency × strength × importance, where importance
+  // grows with link degree — well-connected memories are load-bearing.
+  // Small stores scan exactly; past ANN_THRESHOLD an HNSW index preselects
+  // candidates (oversampled, since rescoring can reorder them).
   async recall(query: string, n = 5, now = Date.now()): Promise<Recalled[]> {
     const qe = await this.embedder.embed(query);
-    const scored: Recalled[] = [];
-    for (const ep of this.episodes.values()) {
-      if (ep.forgotten) continue;
+    this.ensureIndex();
+
+    const score = (ep: Episode, similarity: number): Recalled => {
       const t = this.traces.get(ep.id)!;
-      const similarity = cosine(qe, this.vecs.get(ep.id)!);
       const ageHours = Math.max(0, now - t.lastAccess) / 3_600_000;
       const recency = Math.pow(0.5, ageHours / HALF_LIFE_HOURS);
       const strength = 1 + REINFORCE_WEIGHT * t.recallCount;
-      scored.push({ id: ep.id, score: similarity * recency * strength, similarity, episode: ep });
+      const importance = 1 + DEGREE_WEIGHT * Math.log1p(this.degree.get(ep.id) ?? 0);
+      return { id: ep.id, score: similarity * recency * strength * importance, similarity, episode: ep };
+    };
+
+    let scored: Recalled[];
+    if (this.index) {
+      scored = this.index
+        .search(qe, n * ANN_OVERSAMPLE, undefined, (id) => !this.episodes.get(id)!.forgotten)
+        .map((c) => score(this.episodes.get(c.id)!, c.sim));
+    } else {
+      scored = [];
+      for (const ep of this.episodes.values()) {
+        if (ep.forgotten) continue;
+        scored.push(score(ep, cosine(qe, this.vecs.get(ep.id)!)));
+      }
     }
     scored.sort((a, b) => b.score - a.score);
     const top = scored.slice(0, n).filter((r) => r.similarity > 0);
@@ -301,10 +371,11 @@ export class Store {
       const factId = randomUUID().slice(0, 8);
       this.append([sym("fact"), factId, now, summary, ids]);
       this.vecs.set(factId, await this.embedder.embed(summary));
+      this.indexInsert(factId);
       for (const id of ids) this.append([sym("forget"), id, now]);
       factIds.push(factId);
     }
-    if (factIds.length) this.saveVecCache();
+    if (factIds.length) this.scheduleVecCacheSave();
     return factIds;
   }
 
@@ -327,6 +398,7 @@ export class Store {
       forgotten: all.length - live.length,
       links: this.links.length,
       embedder: this.embedder.name,
+      recall_index: this.index ? "hnsw" : "scan",
     };
   }
 }

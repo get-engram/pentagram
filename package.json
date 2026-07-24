@@ -1,6 +1,6 @@
 {
   "name": "pentagram",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A homoiconic memory substrate: episodic log, associative recall, graph links, and procedural memory in one S-expression language.",
   "type": "module",
   "main": "dist/index.js",
@@ -10,8 +10,12 @@
     "repl": "tsx src/repl.ts",
     "mcp": "tsx src/mcp.ts",
     "smoke": "tsx scripts/smoke.ts",
-    "semantic-check": "tsx scripts/semantic-check.ts"
+    "semantic-check": "tsx scripts/semantic-check.ts",
+    "bench": "tsx scripts/bench.ts"
   },
+  "keywords": ["memory", "ai-memory", "lisp", "s-expressions", "homoiconic", "vector-search", "hnsw", "knowledge-graph", "event-sourcing", "mcp"],
+  "repository": { "type": "git", "url": "git+https://github.com/get-engram/pentagram.git" },
+  "files": ["dist", "src", "README.md", "LICENSE", "docs/paper.md"],
   "license": "MIT",
   "optionalDependencies": {
     "@huggingface/transformers": "^3.0.0"

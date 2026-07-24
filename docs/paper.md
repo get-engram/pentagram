@@ -155,7 +155,7 @@ Falsifiable checkpoints, in order: (1) recall quality against a labeled agent-me
 
 ## 10. Status
 
-v0 (July 2026, ~700 lines, zero runtime dependencies) implements: the reader/printer/evaluator; the append-only log with all four event types; derived embeddings, traces, and links; scored, reinforcing recall; bounded-depth traversal; decay with tombstones; procedural memory via `replay`; a REPL; and an end-to-end test covering language, memory, graph, replay, and restart-refold persistence. Next, in order: real embeddings, the MCP adapter (pentagram as engram's substrate), `defmacro`, consolidation, log segmentation, ANN, columnar archive.
+v0 (July 2026, ~700 lines, zero runtime dependencies) implements: the reader/printer/evaluator; the append-only log with all four event types; derived embeddings, traces, and links; scored, reinforcing recall; bounded-depth traversal; decay with tombstones; procedural memory via `replay`; a REPL; and an end-to-end test covering language, memory, graph, replay, and restart-refold persistence. Next, in order: real embeddings, the MCP adapter (pentagram as a memory substrate for any agent), `defmacro`, consolidation, log segmentation, ANN, columnar archive. Pentagram is a standalone open-source framework; it depends on no product and no product depends on it.
 
 ---
 

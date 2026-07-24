@@ -165,7 +165,7 @@ rl.on("line", async (line) => {
         respond({
           protocolVersion: params?.protocolVersion ?? "2025-06-18",
           capabilities: { tools: {} },
-          serverInfo: { name: "pentagram", version: "0.3.0" },
+          serverInfo: { name: "pentagram", version: "0.4.0" },
         });
         break;
       case "ping":

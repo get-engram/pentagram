@@ -96,6 +96,16 @@ assert(
 const entRecall: any = await run(`(recall "acme" 1)`);
 assert(entRecall[0][0] === e1, "entities are recallable like any memory");
 
+console.log("\n— importance: connected memories rank higher —");
+const i1 = await run(`(remember "the quarterly report template lives in the shared drive")`);
+const i2 = await run(`(remember "the quarterly report template lives in the shared drive")`);
+await run(`(link "${i2}" 'about "${e1}")`);
+const impRecall: any = await run(`(recall "where is the quarterly report template" 2)`);
+assert(
+  impRecall[0][0] === i2,
+  "of two identical memories, the linked one outranks (degree importance)",
+);
+
 console.log("\n— consolidation: sleep as ETL —");
 // Three near-duplicate old episodes about the same client issue.
 const oldTs = Date.now() - 30 * 24 * 3_600_000;
