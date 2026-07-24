@@ -4,6 +4,10 @@ A homoiconic memory substrate for AI systems. No database underneath, no
 dependencies, no impedance layers: the query language, the data model, and the
 on-disk format are all the same thing — S-expressions.
 
+The full design argument — motivation, principles, architecture, the
+quantum-inspired foundations, related work, and evaluation plan — is in the
+[design paper](docs/paper.md).
+
 ```lisp
 ⛧ (remember "warehouse costs are dominated by idle compute credits")
 "1f3a9c2e"
