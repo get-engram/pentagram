@@ -82,6 +82,17 @@ export function memoryEnv(store: Store): Env {
   // LLM-backed compression (claudeSummarizer).
   def("consolidate!", () => store.consolidate());
 
+  // (extract!) -> ((episode-id (entity-ids...)) ...) — mine entities from
+  // unprocessed episodes (requires a configured extractor).
+  def("extract!", async () =>
+    [...(await store.extractEntities()).entries()].map(([id, ents]) => [id, ents]));
+
+  // (sleep!) -> one full sleep cycle: decay → extract → consolidate.
+  def("sleep!", async () => {
+    const s = await store.sleepCycle();
+    return Object.entries(s).map(([k, v]) => [k, v]);
+  });
+
   // (stats) -> ((episodes n) (facts n) (entities n) (live n) (forgotten n) (links n) (embedder name))
   def("stats", () => {
     const s = store.stats();

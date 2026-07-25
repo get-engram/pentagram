@@ -9,6 +9,7 @@ import { memoryEnv } from "../src/memory.js";
 import { evaluate } from "../src/eval.js";
 import { read, print } from "../src/sexp.js";
 import { hashEmbedder } from "../src/embed.js";
+import { extractiveSummarizer } from "../src/summarize.js";
 
 const LOG = "smoke-memory.pgram";
 const cleanup = () => {
@@ -138,6 +139,57 @@ const recallFact: any = await run(`(recall "mobile checkout performance" 1)`);
 assert(recallFact[0][0] === facts[0], "recall now surfaces the consolidated fact");
 const prov: any = await run(`(provenance "${facts[0]}")`);
 assert(prov.length === 3, "(provenance fact-id) resolves from the language");
+
+console.log("\n— entity extraction (stub extractor) —");
+const ex1 = await store.remember("met with sarah from globex about the migration project");
+const stubExtractor = async (text: string) => {
+  const found = [];
+  if (text.includes("sarah")) found.push({ name: "sarah", kind: "person" });
+  if (text.includes("globex")) found.push({ name: "globex", kind: "org" });
+  return found;
+};
+const extRes = await store.extractEntities({ extractor: stubExtractor, limit: 100 });
+assert(extRes.has(ex1), "unprocessed episode was extracted");
+assert(extRes.get(ex1)!.length === 2, "two entities mined from the episode");
+const sarahHops = store.hops(extRes.get(ex1)![0], 1);
+assert(sarahHops.some((h) => h.id === ex1), "mined entity links back to its episode");
+const extAgain = await store.extractEntities({ extractor: stubExtractor, limit: 100 });
+assert(!extAgain.has(ex1), "extraction is incremental (extracted marker persists)");
+
+console.log("\n— sleep cycle —");
+const sleepStore = await Store.open(LOG, hashEmbedder, async (texts) => `sleep-fact: ${texts.length} episodes`, {
+  extractor: stubExtractor,
+});
+const cycle = await sleepStore.sleepCycle();
+console.log(`  cycle → ${JSON.stringify(cycle)}`);
+assert(typeof cycle.forgotten === "number" && typeof cycle.facts === "number", "sleep cycle runs decay → extract → consolidate");
+
+console.log("\n— log segmentation: rollover + snapshot —");
+const SEGLOG = "smoke-segment.pgram";
+const segCleanup = () => {
+  for (const f of fs.readdirSync(".").filter((f) => f.startsWith(SEGLOG))) fs.unlinkSync(f);
+};
+segCleanup();
+let seg = await Store.open(SEGLOG, hashEmbedder);
+const keepId = await seg.remember("the retained memory about database design");
+for (let i = 0; i < 50; i++) await seg.remember(`filler memory number ${i} about nothing in particular`);
+const compId = await seg.remember("linked companion memory");
+seg.link(keepId, "about", compId);
+// Recall traffic: 10×5 recalled events in the log, which the snapshot
+// compacts into a handful of trace lines — that's the size win.
+for (let i = 0; i < 10; i++) await seg.recall("filler memory", 5);
+const preStats = seg.stats();
+// Reopen with a tiny rollover threshold to force segmentation.
+seg = await Store.open(SEGLOG, hashEmbedder, extractiveSummarizer, { maxLogBytes: 1024 });
+const archives = fs.readdirSync(".").filter((f) => f.startsWith(SEGLOG) && f.endsWith(".archive"));
+assert(archives.length === 1, "oversized log archived intact");
+assert(fs.statSync(SEGLOG).size < fs.statSync(archives[0]).size, "active snapshot is smaller than the archived history");
+assert(seg.stats().episodes === preStats.episodes, "all live episodes survive rollover");
+const segRecall = await seg.recall("database design", 1);
+assert(segRecall[0].id === keepId, "recall works from the snapshot");
+seg = await Store.open(SEGLOG, hashEmbedder); // reopen once more: snapshot refolds cleanly
+assert(seg.get(keepId) !== undefined, "snapshot survives a further restart");
+segCleanup();
 
 console.log("\n— persistence: restart and refold the log —");
 store = await Store.open(LOG, hashEmbedder);

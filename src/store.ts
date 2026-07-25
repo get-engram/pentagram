@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import { Sexp, Sym, sym, readAll, print } from "./sexp.js";
 import { Embedder, hashEmbedder, cosine } from "./embed.js";
 import { Summarizer, extractiveSummarizer } from "./summarize.js";
+import { Extractor } from "./extract.js";
 import { HNSW } from "./hnsw.js";
 
 export interface Episode {
@@ -54,11 +55,24 @@ export interface ConsolidateOptions {
   summarizer?: Summarizer; // defaults to extractive; claudeSummarizer for real compression
 }
 
+export interface ExtractOptions {
+  extractor?: Extractor; // defaults to the store's configured extractor
+  limit?: number; // max episodes per pass (extraction can call an LLM)
+  now?: number;
+}
+
+export interface StoreOptions {
+  extractor?: Extractor | null; // default entity extractor (null = extraction off)
+  maxLogBytes?: number; // active-log rollover threshold; Infinity disables
+}
+
 const HALF_LIFE_HOURS = 24 * 30; // recency halves every 30 days
 const REINFORCE_WEIGHT = 0.25; // each recall adds 25% strength
 const DEGREE_WEIGHT = 0.15; // importance: well-connected memories rank higher
 const ANN_THRESHOLD = 2000; // below this, exact full scan; above, HNSW
 const ANN_OVERSAMPLE = 8; // fetch n*this from the index before rescoring
+const DEFAULT_MAX_LOG_BYTES = 10 * 1024 * 1024; // roll the active log at 10 MB
+const EXTRACT_BATCH = 20; // default episodes per extraction pass
 
 export class Store {
   private episodes = new Map<string, Episode>();
@@ -67,12 +81,15 @@ export class Store {
   private vecs = new Map<string, Float32Array>();
   private entityIds = new Map<string, string>(); // "name|kind" -> id
   private degree = new Map<string, number>(); // link count per id
+  private extracted = new Set<string>(); // episode ids already entity-extracted
   private index: HNSW | null = null; // derived, disposable, built past ANN_THRESHOLD
 
   private constructor(
     private path: string,
     readonly embedder: Embedder,
     readonly summarizer: Summarizer,
+    readonly extractor: Extractor | null,
+    private maxLogBytes: number,
   ) {}
 
   /** Open (or create) a store: fold the log, then derive/restore embeddings. */
@@ -80,10 +97,13 @@ export class Store {
     path: string,
     embedder: Embedder = hashEmbedder,
     summarizer: Summarizer = extractiveSummarizer,
+    opts: StoreOptions = {},
   ): Promise<Store> {
-    const s = new Store(path, embedder, summarizer);
+    const s = new Store(path, embedder, summarizer, opts.extractor ?? null,
+      opts.maxLogBytes ?? DEFAULT_MAX_LOG_BYTES);
     if (fs.existsSync(path)) {
       for (const event of readAll(fs.readFileSync(path, "utf8"))) s.fold(event);
+      s.maybeRollover();
     }
     s.loadVecCache();
     await s.ensureVecs();
@@ -149,7 +169,70 @@ export class Store {
         if (e) e.forgotten = true;
         break;
       }
+      case "extracted": {
+        const [id] = rest;
+        this.extracted.add(id);
+        break;
+      }
+      // Snapshot-only event: compact trace state written during rollover.
+      case "trace": {
+        const [id, recallCount, lastAccess] = rest;
+        const t = this.traces.get(id);
+        if (t) {
+          t.recallCount = recallCount;
+          t.lastAccess = lastAccess;
+        }
+        break;
+      }
     }
+  }
+
+  // ---------- log segmentation ----------
+  //
+  // When the active log outgrows maxLogBytes, archive it intact (the exact
+  // layer never loses history) and start a fresh active file seeded with a
+  // snapshot: live episodes/facts/entities, compact trace state, links, and
+  // extraction markers. Loads then read snapshot + tail, not all of history.
+
+  private maybeRollover(): void {
+    if (fs.statSync(this.path).size <= this.maxLogBytes) return;
+    const archive = `${this.path}.${Date.now()}.archive`;
+    fs.renameSync(this.path, archive);
+
+    const lines: string[] = [];
+    const live = [...this.episodes.values()]
+      .filter((e) => !e.forgotten)
+      .sort((a, b) => a.ts - b.ts);
+    for (const e of live) {
+      if (e.kind === "fact") lines.push(print([sym("fact"), e.id, e.ts, e.text, e.provenance ?? []]));
+      else if (e.kind === "entity") {
+        const kindName = e.text.slice(e.text.lastIndexOf("(") + 1, -1);
+        lines.push(print([sym("entity"), e.id, e.ts, e.content, sym(kindName)]));
+      } else lines.push(print([sym("episode"), e.id, e.ts, e.content]));
+    }
+    const liveIds = new Set(live.map((e) => e.id));
+    for (const [id, t] of this.traces) {
+      if (liveIds.has(id) && t.recallCount > 0)
+        lines.push(print([sym("trace"), id, t.recallCount, t.lastAccess]));
+    }
+    for (const id of this.extracted) {
+      if (liveIds.has(id)) lines.push(print([sym("extracted"), id, Date.now()]));
+    }
+    for (const l of this.links) {
+      if (liveIds.has(l.src) && liveIds.has(l.dst))
+        lines.push(print([sym("link"), l.src, sym(l.rel), l.dst]));
+    }
+    fs.writeFileSync(this.path, lines.join("\n") + "\n");
+
+    // Refold from the snapshot so in-memory state matches the new active file
+    // (dropped tombstones, pruned dangling links).
+    this.episodes.clear();
+    this.traces.clear();
+    this.links = [];
+    this.degree.clear();
+    this.entityIds.clear();
+    this.extracted.clear();
+    for (const event of readAll(fs.readFileSync(this.path, "utf8"))) this.fold(event);
   }
 
   // ---------- derived embeddings + sidecar cache ----------
@@ -377,6 +460,49 @@ export class Store {
     }
     if (factIds.length) this.scheduleVecCacheSave();
     return factIds;
+  }
+
+  // Entity extraction, batch-style (like consolidation): process live episodes
+  // that have not been extracted yet, creating entity nodes and `mentions`
+  // links. Each processed episode gets an `extracted` marker event so passes
+  // are incremental and idempotent. Capped per pass — extraction may call an
+  // LLM per episode.
+  async extractEntities(opts: ExtractOptions = {}): Promise<Map<string, string[]>> {
+    const { extractor = this.extractor, limit = EXTRACT_BATCH, now = Date.now() } = opts;
+    if (!extractor) throw new Error("no extractor configured");
+    const results = new Map<string, string[]>();
+    const pending = [...this.episodes.values()]
+      .filter((e) => !e.forgotten && e.kind === "episode" && !this.extracted.has(e.id))
+      .sort((a, b) => a.ts - b.ts)
+      .slice(0, limit);
+
+    for (const ep of pending) {
+      const found = await extractor(ep.text);
+      const entIds: string[] = [];
+      for (const { name, kind } of found) {
+        const eid = await this.entity(name, kind, now);
+        if (!this.links.some((l) => l.src === ep.id && l.rel === "mentions" && l.dst === eid)) {
+          this.link(ep.id, "mentions", eid);
+        }
+        entIds.push(eid);
+      }
+      this.append([sym("extracted"), ep.id, now]);
+      results.set(ep.id, entIds);
+    }
+    return results;
+  }
+
+  // The sleep cycle: decay → extract → consolidate, in that order (extraction
+  // before consolidation so entities are mined from episodes before those
+  // episodes are compressed into facts).
+  async sleepCycle(now = Date.now()): Promise<{ forgotten: number; extracted: number; facts: number }> {
+    const forgotten = this.decay(now).length;
+    let extracted = 0;
+    if (this.extractor) {
+      extracted = (await this.extractEntities({ now })).size;
+    }
+    const facts = (await this.consolidate({ now })).length;
+    return { forgotten, extracted, facts };
   }
 
   get(id: string): Episode | undefined {

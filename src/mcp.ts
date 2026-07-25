@@ -17,6 +17,7 @@ import { evaluate, Env } from "./eval.js";
 import { read, print } from "./sexp.js";
 import { bestEmbedder, hashEmbedder, semanticEmbedder, disposeEmbedder } from "./embed.js";
 import { bestSummarizer, claudeSummarizer, extractiveSummarizer } from "./summarize.js";
+import { bestExtractor, claudeExtractor } from "./extract.js";
 
 const LOG_PATH = process.env.PENTAGRAM_LOG ?? "memory.pgram";
 
@@ -33,8 +34,23 @@ async function ensure(): Promise<Env> {
       process.env.PENTAGRAM_SUMMARIZER === "extractive" ? extractiveSummarizer
       : process.env.PENTAGRAM_SUMMARIZER === "claude" ? claudeSummarizer()
       : await bestSummarizer();
-    store = await Store.open(LOG_PATH, embedder, summarizer);
+    const extractor =
+      process.env.PENTAGRAM_EXTRACTOR === "off" ? null
+      : process.env.PENTAGRAM_EXTRACTOR === "claude" ? claudeExtractor()
+      : await bestExtractor();
+    store = await Store.open(LOG_PATH, embedder, summarizer, { extractor });
     env = memoryEnv(store);
+
+    // Scheduled sleep: PENTAGRAM_SLEEP=<minutes> runs decay → extract →
+    // consolidate on a timer. Off by default (extraction/summarization may
+    // call an LLM; scheduling that is an explicit choice).
+    const sleepMin = Number(process.env.PENTAGRAM_SLEEP ?? 0);
+    if (sleepMin > 0) {
+      const timer = setInterval(() => {
+        store?.sleepCycle().catch(() => {/* sleep is best-effort; next tick retries */});
+      }, sleepMin * 60_000);
+      timer.unref?.();
+    }
   }
   return env;
 }
@@ -98,11 +114,19 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "sleep",
+    description:
+      "Run one sleep cycle: decay stale memories, extract entities from new " +
+      "episodes, consolidate similar old episodes into provenance-carrying facts.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
     name: "eval",
     description:
       "Evaluate a pentagram S-expression directly — the full language: " +
-      "(recall ...), (remember ...), (replay id), (consolidate!), (decay!), " +
-      "(defmacro ...), lambdas, map/filter. The agent protocol is the language.",
+      "(recall ...), (remember ...), (replay id), (sleep!), (consolidate!), " +
+      "(extract!), (decay!), (defmacro ...), lambdas, map/filter. " +
+      "The agent protocol is the language.",
     inputSchema: {
       type: "object",
       properties: { code: { type: "string", description: "S-expression source" } },
@@ -131,6 +155,10 @@ async function callTool(name: string, args: any): Promise<string> {
       return print(store!.hops(String(args.id), args.depth ?? 2).map((h) => [h.id, h.via]));
     case "stats":
       return print(Object.entries(store!.stats()).map(([k, v]) => [k, v]));
+    case "sleep": {
+      const s = await store!.sleepCycle();
+      return print(Object.entries(s).map(([k, v]) => [k, v]));
+    }
     case "eval":
       return print(await run(String(args.code)));
     default:
@@ -187,7 +215,7 @@ async function handle(req: any): Promise<void> {
         respond({
           protocolVersion: params?.protocolVersion ?? "2025-06-18",
           capabilities: { tools: {} },
-          serverInfo: { name: "pentagram", version: "0.4.1" },
+          serverInfo: { name: "pentagram", version: "0.5.0" },
         });
         break;
       case "ping":

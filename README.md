@@ -100,6 +100,23 @@ environment — no memory operations reachable. `(replay! id)` deliberately
 escalates to full access for trusted code; the `!` is the audit trail in the
 source.
 
+**Entity extraction.** `(extract!)` mines named entities from unprocessed
+episodes and wires `mentions` links — the graph builds itself from raw text.
+The LLM extractor (`claudeExtractor`) prompts the claude CLI to reply in
+S-expressions, parsed by pentagram's own reader. Passes are incremental
+(`extracted` markers) and capped per batch.
+
+**The sleep cycle.** `(sleep!)` runs decay → extract → consolidate in one
+pass — forget the stale, mine structure from the new, compress the similar.
+The MCP server schedules it with `PENTAGRAM_SLEEP=<minutes>` (off by default;
+scheduling LLM calls is an explicit choice), and exposes it as a `sleep` tool.
+
+**Log segmentation.** When the active log exceeds 10 MB (configurable via
+`StoreOptions.maxLogBytes`), it is archived intact — the exact layer never
+loses history — and replaced by a compact snapshot of live state (episodes,
+facts, entities, links, trace summaries). Loads read snapshot + tail instead
+of all of history; archives remain on disk for audit and provenance.
+
 The library surface is exported from `src/index.ts` (`Store`, `memoryEnv`,
 `evaluate`, `read`, `print`, embedders).
 
@@ -113,17 +130,17 @@ never persisted, rebuilt at need, tombstones filtered at search time.
 
 ## Status & roadmap
 
-v0.4 implements the language (with `defmacro`/quasiquote), the two-layer store,
+v0.5 implements the language (with `defmacro`/quasiquote), the two-layer store,
 semantic recall with importance scoring, reinforcement and decay, LLM-backed
-consolidation with provenance, the entity layer, sandboxed procedural replay,
-automatic HNSW indexing, a REPL, and the MCP server. Still honest about gaps:
+consolidation and entity extraction, the sleep cycle, log segmentation with
+snapshots, sandboxed procedural replay, automatic HNSW indexing, a REPL, and
+the MCP server. Still honest about gaps:
 
-- The log is one text file, single-writer. Then: segmentation, snapshots, and
-  columnar (Parquet) compaction of the cold tail for the analytical layer.
+- Single-writer only; no concurrent-process locking on the active log.
 - The MCP `eval` tool retains full access by design (the agent protocol is the
   language); `replay` is sandboxed, but multi-tenant isolation does not exist.
-- Planned next: automatic entity extraction at remember time (LLM), scheduled
-  consolidation, log segmentation, npm publish.
+- Archives are kept but not yet queryable in place; planned: columnar
+  (Parquet) compaction of archives for the analytical tail.
 
 Pentagram is a standalone open-source framework (MIT): it depends on no
 product, and no product depends on it.
