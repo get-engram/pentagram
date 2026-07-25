@@ -180,6 +180,7 @@ let pending = 0;
 let closing = false;
 async function maybeExit(): Promise<void> {
   if (closing && pending === 0) {
+    store?.close();
     await disposeEmbedder();
     process.exit(0);
   }

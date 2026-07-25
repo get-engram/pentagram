@@ -28,4 +28,7 @@ rl.on("line", async (line) => {
   }
   rl.prompt();
 });
-rl.on("close", () => process.exit(0));
+rl.on("close", () => {
+  store.close();
+  process.exit(0);
+});

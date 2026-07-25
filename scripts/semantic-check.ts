@@ -9,7 +9,7 @@ import { semanticEmbedder, disposeEmbedder } from "../src/embed.js";
 
 const LOG = "semantic-check.pgram";
 const cleanup = () => {
-  for (const f of [LOG, LOG + ".vecs.json"]) if (fs.existsSync(f)) fs.unlinkSync(f);
+  for (const f of [LOG, LOG + ".vecs.json", LOG + ".lock"]) if (fs.existsSync(f)) fs.unlinkSync(f);
 };
 cleanup();
 

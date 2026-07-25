@@ -136,7 +136,10 @@ consolidation and entity extraction, the sleep cycle, log segmentation with
 snapshots, sandboxed procedural replay, automatic HNSW indexing, a REPL, and
 the MCP server. Still honest about gaps:
 
-- Single-writer only; no concurrent-process locking on the active log.
+- Single-writer by design, now *enforced*: a lockfile (`<log>.lock`) makes a
+  second open of the same log fail fast instead of corrupting it; locks from
+  dead processes are stolen automatically. Concurrent multi-writer access is
+  out of scope for the file backend.
 - The MCP `eval` tool retains full access by design (the agent protocol is the
   language); `replay` is sandboxed, but multi-tenant isolation does not exist.
 - Archives are kept but not yet queryable in place; planned: columnar

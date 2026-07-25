@@ -101,6 +101,7 @@ export class Store {
   ): Promise<Store> {
     const s = new Store(path, embedder, summarizer, opts.extractor ?? null,
       opts.maxLogBytes ?? DEFAULT_MAX_LOG_BYTES);
+    s.acquireLock();
     if (fs.existsSync(path)) {
       for (const event of readAll(fs.readFileSync(path, "utf8"))) s.fold(event);
       s.maybeRollover();
@@ -109,6 +110,57 @@ export class Store {
     await s.ensureVecs();
     s.saveVecCache();
     return s;
+  }
+
+  // ---------- single-writer lock ----------
+  //
+  // The append-only log has exactly one writer. A lockfile (<log>.lock,
+  // holding the owner pid) makes that a checked invariant instead of a hope:
+  // a second open of the same log throws. Locks from dead processes are
+  // stolen automatically, so crashes never wedge the store.
+
+  private lockPath(): string {
+    return this.path + ".lock";
+  }
+
+  private acquireLock(): void {
+    const tryAcquire = () =>
+      fs.writeFileSync(this.lockPath(), String(process.pid), { flag: "wx" });
+    try {
+      tryAcquire();
+    } catch (e: any) {
+      if (e.code !== "EEXIST") throw e;
+      const holder = Number(fs.readFileSync(this.lockPath(), "utf8"));
+      // Our own pid counts as a live holder too: a second Store instance in
+      // the same process is still a second writer.
+      if (holder && (holder === process.pid || isAlive(holder))) {
+        throw new Error(`memory log ${this.path} is locked by running process ${holder}`);
+      }
+      fs.unlinkSync(this.lockPath()); // stale (dead holder): steal it
+      tryAcquire();
+    }
+    this.locked = true;
+  }
+
+  private locked = false;
+
+  /** Flush derived caches and release the writer lock. */
+  close(): void {
+    if (this.cacheTimer) {
+      clearTimeout(this.cacheTimer);
+      this.cacheTimer = null;
+    }
+    this.flush();
+    if (this.locked) {
+      try {
+        if (Number(fs.readFileSync(this.lockPath(), "utf8")) === process.pid) {
+          fs.unlinkSync(this.lockPath());
+        }
+      } catch {
+        /* already gone */
+      }
+      this.locked = false;
+    }
   }
 
   // ---------- exact layer ----------
@@ -526,5 +578,14 @@ export class Store {
       embedder: this.embedder.name,
       recall_index: this.index ? "hnsw" : "scan",
     };
+  }
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }

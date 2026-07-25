@@ -13,7 +13,7 @@ import { extractiveSummarizer } from "../src/summarize.js";
 
 const LOG = "smoke-memory.pgram";
 const cleanup = () => {
-  for (const f of [LOG, LOG + ".vecs.json"]) if (fs.existsSync(f)) fs.unlinkSync(f);
+  for (const f of [LOG, LOG + ".vecs.json", LOG + ".lock"]) if (fs.existsSync(f)) fs.unlinkSync(f);
 };
 cleanup();
 
@@ -156,13 +156,30 @@ assert(sarahHops.some((h) => h.id === ex1), "mined entity links back to its epis
 const extAgain = await store.extractEntities({ extractor: stubExtractor, limit: 100 });
 assert(!extAgain.has(ex1), "extraction is incremental (extracted marker persists)");
 
+console.log("\n— single-writer lock —");
+let lockRefused = false;
+try {
+  await Store.open(LOG, hashEmbedder);
+} catch (e: any) {
+  lockRefused = /locked by running process/.test(e.message);
+}
+assert(lockRefused, "second open of a locked log is refused");
+fs.writeFileSync(LOG + ".lock", "999999999"); // simulate a dead holder
+// (current store keeps its handle; stale-steal is exercised on reopen below)
+
 console.log("\n— sleep cycle —");
-const sleepStore = await Store.open(LOG, hashEmbedder, async (texts) => `sleep-fact: ${texts.length} episodes`, {
+const SLEEPLOG = "smoke-sleep.pgram";
+for (const f of [SLEEPLOG, SLEEPLOG + ".vecs.json", SLEEPLOG + ".lock"]) if (fs.existsSync(f)) fs.unlinkSync(f);
+const sleepStore = await Store.open(SLEEPLOG, hashEmbedder, async (texts) => `sleep-fact: ${texts.length} episodes`, {
   extractor: stubExtractor,
 });
+await sleepStore.remember("sarah confirmed the globex meeting");
 const cycle = await sleepStore.sleepCycle();
 console.log(`  cycle → ${JSON.stringify(cycle)}`);
 assert(typeof cycle.forgotten === "number" && typeof cycle.facts === "number", "sleep cycle runs decay → extract → consolidate");
+assert(cycle.extracted === 1, "sleep cycle extracted the new episode");
+sleepStore.close();
+for (const f of [SLEEPLOG, SLEEPLOG + ".vecs.json"]) if (fs.existsSync(f)) fs.unlinkSync(f);
 
 console.log("\n— log segmentation: rollover + snapshot —");
 const SEGLOG = "smoke-segment.pgram";
@@ -172,6 +189,7 @@ const segCleanup = () => {
 segCleanup();
 let seg = await Store.open(SEGLOG, hashEmbedder);
 const keepId = await seg.remember("the retained memory about database design");
+const segClose = () => seg.close();
 for (let i = 0; i < 50; i++) await seg.remember(`filler memory number ${i} about nothing in particular`);
 const compId = await seg.remember("linked companion memory");
 seg.link(keepId, "about", compId);
@@ -180,6 +198,7 @@ seg.link(keepId, "about", compId);
 for (let i = 0; i < 10; i++) await seg.recall("filler memory", 5);
 const preStats = seg.stats();
 // Reopen with a tiny rollover threshold to force segmentation.
+segClose();
 seg = await Store.open(SEGLOG, hashEmbedder, extractiveSummarizer, { maxLogBytes: 1024 });
 const archives = fs.readdirSync(".").filter((f) => f.startsWith(SEGLOG) && f.endsWith(".archive"));
 assert(archives.length === 1, "oversized log archived intact");
@@ -187,12 +206,17 @@ assert(fs.statSync(SEGLOG).size < fs.statSync(archives[0]).size, "active snapsho
 assert(seg.stats().episodes === preStats.episodes, "all live episodes survive rollover");
 const segRecall = await seg.recall("database design", 1);
 assert(segRecall[0].id === keepId, "recall works from the snapshot");
+seg.close();
 seg = await Store.open(SEGLOG, hashEmbedder); // reopen once more: snapshot refolds cleanly
 assert(seg.get(keepId) !== undefined, "snapshot survives a further restart");
+seg.close();
 segCleanup();
 
 console.log("\n— persistence: restart and refold the log —");
+// The lockfile currently holds a fake dead pid (planted above): this reopen
+// must steal the stale lock instead of refusing.
 store = await Store.open(LOG, hashEmbedder);
+assert(fs.readFileSync(LOG + ".lock", "utf8") === String(process.pid), "stale lock stolen on reopen");
 env = memoryEnv(store);
 const recall2: any = await run(`(recall "star schema dimensions" 1)`);
 assert(recall2[0][0] === b, "state survives restart (log refold)");
