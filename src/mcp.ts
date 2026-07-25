@@ -22,20 +22,25 @@ import { Tenants } from "./tenants.js";
 
 const LOG_PATH = process.env.PENTAGRAM_LOG ?? "memory.pgram";
 
-let store: Store | null = null;
-let env: Env | null = null;
-let tenants: Tenants | null = null;
-const tenantEnvs = new Map<string, Env>();
+// Concurrent tool calls race into initialization, so every lazy singleton
+// here memoizes its PROMISE, not its result — one open, everyone awaits it.
+// (Learned the hard way: caching the result let N concurrent calls all try
+// to open the store, and the single-writer lock correctly refused N-1.)
+
+interface Session {
+  st: Store;
+  e: Env;
+}
 
 interface Config {
   embedder: any;
   summarizer: any;
   extractor: any;
 }
-let cfg: Config | null = null;
 
-async function config(): Promise<Config> {
-  if (!cfg) {
+let cfgPromise: Promise<Config> | null = null;
+function config(): Promise<Config> {
+  return (cfgPromise ??= (async () => {
     const embedder =
       process.env.PENTAGRAM_EMBEDDER === "hash" ? hashEmbedder
       : process.env.PENTAGRAM_EMBEDDER === "semantic" ? semanticEmbedder
@@ -48,16 +53,15 @@ async function config(): Promise<Config> {
       process.env.PENTAGRAM_EXTRACTOR === "off" ? null
       : process.env.PENTAGRAM_EXTRACTOR === "claude" ? claudeExtractor()
       : await bestExtractor();
-    cfg = { embedder, summarizer, extractor };
-  }
-  return cfg;
+    return { embedder, summarizer, extractor };
+  })());
 }
 
-async function ensure(): Promise<Env> {
-  if (!env) {
+let mainPromise: Promise<Session> | null = null;
+function mainSession(): Promise<Session> {
+  return (mainPromise ??= (async () => {
     const c = await config();
-    store = await Store.open(LOG_PATH, c.embedder, c.summarizer, { extractor: c.extractor });
-    env = memoryEnv(store);
+    const st = await Store.open(LOG_PATH, c.embedder, c.summarizer, { extractor: c.extractor });
 
     // Scheduled sleep: PENTAGRAM_SLEEP=<minutes> runs decay → extract →
     // consolidate on a timer. Off by default (extraction/summarization may
@@ -65,31 +69,40 @@ async function ensure(): Promise<Env> {
     const sleepMin = Number(process.env.PENTAGRAM_SLEEP ?? 0);
     if (sleepMin > 0) {
       const timer = setInterval(() => {
-        store?.sleepCycle().catch(() => {/* sleep is best-effort; next tick retries */});
+        st.sleepCycle().catch(() => {/* sleep is best-effort; next tick retries */});
       }, sleepMin * 60_000);
       timer.unref?.();
     }
+    return { st, e: memoryEnv(st) };
+  })());
+}
+
+let tenantsPromise: Promise<Tenants> | null = null;
+function getTenants(): Promise<Tenants> {
+  return (tenantsPromise ??= (async () => {
+    const c = await config();
+    return new Tenants(LOG_PATH + ".tenants", c.embedder, c.summarizer, { extractor: c.extractor });
+  })());
+}
+
+const tenantSessions = new Map<string, Promise<Session>>();
+function tenantSession(name: string): Promise<Session> {
+  let p = tenantSessions.get(name);
+  if (!p) {
+    p = (async () => {
+      const st = await (await getTenants()).get(name);
+      return { st, e: memoryEnv(st) };
+    })();
+    tenantSessions.set(name, p);
   }
-  return env;
+  return p;
 }
 
 // Tenant isolation: `tenant` on any tool routes to a fully separate store
 // (own log/lock/caches/environment) under <log>.tenants/. No tenant = the
 // default store, exactly as before.
-async function resolve(tenant?: string): Promise<{ st: Store; e: Env }> {
-  if (!tenant) {
-    const e = await ensure();
-    return { st: store!, e };
-  }
-  const c = await config();
-  tenants ??= new Tenants(LOG_PATH + ".tenants", c.embedder, c.summarizer, { extractor: c.extractor });
-  const st = await tenants.get(tenant);
-  let e = tenantEnvs.get(tenant);
-  if (!e) {
-    e = memoryEnv(st);
-    tenantEnvs.set(tenant, e);
-  }
-  return { st, e };
+function resolve(tenant?: string): Promise<Session> {
+  return tenant ? tenantSession(tenant) : mainSession();
 }
 
 const TOOLS = [
@@ -225,8 +238,12 @@ let pending = 0;
 let closing = false;
 async function maybeExit(): Promise<void> {
   if (closing && pending === 0) {
-    store?.close();
-    await tenants?.close();
+    try {
+      if (mainPromise) (await mainPromise).st.close();
+      if (tenantsPromise) await (await tenantsPromise).close();
+    } catch {
+      /* close is best-effort on the way out */
+    }
     await disposeEmbedder();
     process.exit(0);
   }
@@ -262,7 +279,7 @@ async function handle(req: any): Promise<void> {
         respond({
           protocolVersion: params?.protocolVersion ?? "2025-06-18",
           capabilities: { tools: {} },
-          serverInfo: { name: "pentagram", version: "0.6.0" },
+          serverInfo: { name: "pentagram", version: "0.6.1" },
         });
         break;
       case "ping":

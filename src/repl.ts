@@ -1,17 +1,32 @@
 #!/usr/bin/env node
 import * as readline from "node:readline";
+import * as fs from "node:fs";
 import { Store } from "./store.js";
 import { memoryEnv } from "./memory.js";
 import { evaluate } from "./eval.js";
 import { read, print } from "./sexp.js";
 import { bestEmbedder } from "./embed.js";
 
-const path = process.argv[2] ?? "memory.pgram";
+const VERSION = JSON.parse(
+  fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version;
+
+const arg = process.argv[2];
+if (arg?.startsWith("-")) {
+  // Flags are not filenames: without this, `pentagram --help` would create a
+  // memory log literally named "--help".
+  console.log(`pentagram v${VERSION} — a homoiconic memory substrate`);
+  console.log(`usage: pentagram [memory-log-path]   (default: memory.pgram)`);
+  console.log(`docs:  https://www.npmjs.com/package/pentagram-db`);
+  process.exit(arg === "--help" || arg === "-h" || arg === "--version" || arg === "-v" ? 0 : 1);
+}
+
+const path = arg ?? "memory.pgram";
 const embedder = await bestEmbedder();
 const store = await Store.open(path, embedder);
 const env = memoryEnv(store);
 
-console.log(`pentagram v0.2.0 — memory log: ${path} — embedder: ${embedder.name}`);
+console.log(`pentagram v${VERSION} — memory log: ${path} — embedder: ${embedder.name}`);
 console.log(`try: (remember "hello world")  (recall "hello")  (stats)\n`);
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: "⛧ " });
