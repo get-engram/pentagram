@@ -145,9 +145,20 @@ function send(msg: object): void {
 }
 
 const rl = readline.createInterface({ input: process.stdin });
-rl.on("close", async () => {
-  await disposeEmbedder();
-  process.exit(0);
+
+// Don't exit while tool calls are in flight: stdin closing (e.g. piped
+// input) must not drop responses that are still being computed.
+let pending = 0;
+let closing = false;
+async function maybeExit(): Promise<void> {
+  if (closing && pending === 0) {
+    await disposeEmbedder();
+    process.exit(0);
+  }
+}
+rl.on("close", () => {
+  closing = true;
+  void maybeExit();
 });
 rl.on("line", async (line) => {
   if (!line.trim()) return;
@@ -157,6 +168,16 @@ rl.on("line", async (line) => {
   } catch {
     return;
   }
+  pending++;
+  try {
+    await handle(req);
+  } finally {
+    pending--;
+    void maybeExit();
+  }
+});
+
+async function handle(req: any): Promise<void> {
   const { id, method, params } = req;
   const respond = (result: object) => id !== undefined && send({ jsonrpc: "2.0", id, result });
 
@@ -166,7 +187,7 @@ rl.on("line", async (line) => {
         respond({
           protocolVersion: params?.protocolVersion ?? "2025-06-18",
           capabilities: { tools: {} },
-          serverInfo: { name: "pentagram", version: "0.4.0" },
+          serverInfo: { name: "pentagram", version: "0.4.1" },
         });
         break;
       case "ping":
@@ -195,4 +216,4 @@ rl.on("line", async (line) => {
       send({ jsonrpc: "2.0", id, error: { code: -32603, message: e.message } });
     }
   }
-});
+}
