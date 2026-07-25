@@ -31,19 +31,34 @@ console.log(`try: (remember "hello world")  (recall "hello")  (stats)\n`);
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: "⛧ " });
 rl.prompt();
+
+// Same drain discipline as the MCP server: piped stdin closes before async
+// evaluations finish, and exiting early would swallow their output.
+let pending = 0;
+let closing = false;
+const maybeExit = () => {
+  if (closing && pending === 0) {
+    store.close();
+    process.exit(0);
+  }
+};
 rl.on("line", async (line) => {
   const src = line.trim();
   if (src === "exit" || src === "quit") return rl.close();
   if (src) {
+    pending++;
     try {
       console.log(print(await evaluate(read(src), env)));
     } catch (e: any) {
       console.error("error:", e.message);
+    } finally {
+      pending--;
+      maybeExit();
     }
   }
   rl.prompt();
 });
 rl.on("close", () => {
-  store.close();
-  process.exit(0);
+  closing = true;
+  maybeExit();
 });
