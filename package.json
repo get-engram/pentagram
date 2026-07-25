@@ -1,12 +1,18 @@
 {
-  "name": "pentagram",
+  "name": "pentagram-db",
   "version": "0.4.0",
   "description": "A homoiconic memory substrate: episodic log, associative recall, graph links, and procedural memory in one S-expression language.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "pentagram": "dist/repl.js",
+    "pentagram-mcp": "dist/mcp.js"
+  },
+  "engines": { "node": ">=20" },
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run smoke && npm run build",
     "repl": "tsx src/repl.ts",
     "mcp": "tsx src/mcp.ts",
     "smoke": "tsx scripts/smoke.ts",

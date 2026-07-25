@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // MCP server over stdio: pentagram as a memory substrate for any agent.
 // Hand-rolled JSON-RPC (newline-delimited, per the MCP stdio transport) —
 // no SDK, keeping the zero-runtime-dependency core.

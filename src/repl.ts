@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import * as readline from "node:readline";
 import { Store } from "./store.js";
 import { memoryEnv } from "./memory.js";
