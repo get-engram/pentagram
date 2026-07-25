@@ -10,6 +10,7 @@ import { evaluate } from "../src/eval.js";
 import { read, print } from "../src/sexp.js";
 import { hashEmbedder } from "../src/embed.js";
 import { extractiveSummarizer } from "../src/summarize.js";
+import { Tenants } from "../src/tenants.js";
 
 const LOG = "smoke-memory.pgram";
 const cleanup = () => {
@@ -209,8 +210,60 @@ assert(segRecall[0].id === keepId, "recall works from the snapshot");
 seg.close();
 seg = await Store.open(SEGLOG, hashEmbedder); // reopen once more: snapshot refolds cleanly
 assert(seg.get(keepId) !== undefined, "snapshot survives a further restart");
+
+console.log("\n— archive compaction to parquet —");
+let pqAvailable = true;
+try {
+  await import("@dsnp/parquetjs");
+} catch {
+  pqAvailable = false;
+}
+if (pqAvailable) {
+  const parquets = await seg.compactArchives();
+  assert(parquets.length === 1, "archive compacted to one parquet file");
+  assert(!fs.existsSync(archives[0]), "original text archive removed after lossless conversion");
+  const pq: any = await import("@dsnp/parquetjs");
+  const reader = await pq.ParquetReader.openFile(parquets[0]);
+  const cursor = reader.getCursor();
+  let rows = 0;
+  let episodeRows = 0;
+  let rawOk = true;
+  for (let row = await cursor.next(); row; row = await cursor.next()) {
+    rows++;
+    if (row.event === "episode") episodeRows++;
+    if (!String(row.raw).startsWith("(")) rawOk = false;
+  }
+  await reader.close();
+  assert(episodeRows >= 52, `parquet holds the archived episodes (${episodeRows} rows)`);
+  assert(rawOk && rows > episodeRows, `raw S-expression column preserved on all ${rows} rows`);
+} else {
+  console.log("  (skipped: optional @dsnp/parquetjs not installed)");
+}
 seg.close();
 segCleanup();
+
+console.log("\n— multi-tenant isolation —");
+const TROOT = "smoke-tenants";
+fs.rmSync(TROOT, { recursive: true, force: true });
+const tenants = new Tenants(TROOT, hashEmbedder);
+const alpha = await tenants.get("alpha");
+const beta = await tenants.get("beta");
+await alpha.remember("alpha secret: the launch code is waffles");
+await beta.remember("beta note: a completely unrelated grocery list");
+const alphaRecall = await alpha.recall("secret launch code", 3);
+const betaRecall = await beta.recall("secret launch code", 3);
+assert(alphaRecall.some((r) => r.episode.text.includes("waffles")), "tenant alpha recalls its own memory");
+assert(!betaRecall.some((r) => r.episode.text.includes("waffles")), "tenant beta cannot see alpha's memory");
+assert((await tenants.get("alpha")) === alpha, "tenant stores are cached per name");
+let rejected = false;
+try {
+  await tenants.get("../evil");
+} catch (e: any) {
+  rejected = /invalid tenant name/.test(e.message);
+}
+assert(rejected, "path-traversal tenant name rejected");
+await tenants.close();
+fs.rmSync(TROOT, { recursive: true, force: true });
 
 console.log("\n— persistence: restart and refold the log —");
 // The lockfile currently holds a fake dead pid (planted above): this reopen

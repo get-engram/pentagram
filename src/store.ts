@@ -13,6 +13,7 @@
 // (<log>.vecs.json, tagged by embedder) makes reopening cheap.
 
 import * as fs from "node:fs";
+import * as nodePath from "node:path";
 import { randomUUID } from "node:crypto";
 import { Sexp, Sym, sym, readAll, print } from "./sexp.js";
 import { Embedder, hashEmbedder, cosine } from "./embed.js";
@@ -512,6 +513,73 @@ export class Store {
     }
     if (factIds.length) this.scheduleVecCacheSave();
     return factIds;
+  }
+
+  // Archive compaction: convert archived log segments (text S-expressions)
+  // to Parquet so the cold tail joins the composable stack — DuckDB, Spark,
+  // anything that reads Parquet can query pentagram's history in place.
+  // Lossless: typed columns for the common queries, plus a `raw` column
+  // holding each original S-expression line. Requires the optional
+  // @dsnp/parquetjs dependency.
+  async compactArchives(opts: { remove?: boolean } = {}): Promise<string[]> {
+    const { remove = true } = opts;
+    const dir = nodePath.dirname(nodePath.resolve(this.path));
+    const base = nodePath.basename(this.path);
+    const archives = fs.readdirSync(dir)
+      .filter((f) => f.startsWith(base + ".") && f.endsWith(".archive"))
+      .map((f) => nodePath.join(dir, f));
+    if (!archives.length) return [];
+
+    let pq: any;
+    try {
+      pq = await import("@dsnp/parquetjs");
+    } catch {
+      throw new Error("archive compaction needs the optional dependency @dsnp/parquetjs");
+    }
+    const schema = new pq.ParquetSchema({
+      event: { type: "UTF8" },
+      id: { type: "UTF8", optional: true },
+      ts: { type: "DOUBLE", optional: true },
+      text: { type: "UTF8", optional: true },
+      src: { type: "UTF8", optional: true },
+      rel: { type: "UTF8", optional: true },
+      dst: { type: "UTF8", optional: true },
+      raw: { type: "UTF8" },
+    });
+
+    const written: string[] = [];
+    for (const archive of archives) {
+      const out = archive.replace(/\.archive$/, ".parquet");
+      const writer = await pq.ParquetWriter.openFile(schema, out);
+      for (const event of readAll(fs.readFileSync(archive, "utf8"))) {
+        const [tag, ...rest] = event as [Sym, ...Sexp[]];
+        const raw = print(event);
+        switch (tag.name) {
+          case "episode":
+          case "fact":
+            await writer.appendRow({
+              event: tag.name, id: rest[0], ts: rest[1],
+              text: typeof rest[2] === "string" ? rest[2] : print(rest[2]), raw,
+            });
+            break;
+          case "entity":
+            await writer.appendRow({ event: "entity", id: rest[0], ts: rest[1], text: String(rest[2]), raw });
+            break;
+          case "link":
+            await writer.appendRow({
+              event: "link", src: rest[0],
+              rel: rest[1] instanceof Sym ? rest[1].name : String(rest[1]), dst: rest[2], raw,
+            });
+            break;
+          default: // recalled, forget, extracted, trace
+            await writer.appendRow({ event: tag.name, id: rest[0], ts: typeof rest[1] === "number" ? rest[1] : undefined, raw });
+        }
+      }
+      await writer.close();
+      if (remove) fs.unlinkSync(archive);
+      written.push(out);
+    }
+    return written;
   }
 
   // Entity extraction, batch-style (like consolidation): process live episodes

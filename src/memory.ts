@@ -93,6 +93,10 @@ export function memoryEnv(store: Store): Env {
     return Object.entries(s).map(([k, v]) => [k, v]);
   });
 
+  // (compact!) -> archived log segments converted to Parquet (paths returned).
+  // Requires the optional @dsnp/parquetjs dependency.
+  def("compact!", () => store.compactArchives());
+
   // (stats) -> ((episodes n) (facts n) (entities n) (live n) (forgotten n) (links n) (embedder name))
   def("stats", () => {
     const s = store.stats();

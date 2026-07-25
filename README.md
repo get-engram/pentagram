@@ -117,6 +117,18 @@ loses history — and replaced by a compact snapshot of live state (episodes,
 facts, entities, links, trace summaries). Loads read snapshot + tail instead
 of all of history; archives remain on disk for audit and provenance.
 
+**Parquet compaction.** `(compact!)` converts archived segments to Parquet
+(optional `@dsnp/parquetjs` dependency): typed columns for the common
+queries plus a `raw` column holding every original S-expression line, so the
+conversion is lossless. The cold tail joins the composable stack — DuckDB,
+Spark, anything that reads Parquet can query pentagram's history in place.
+
+**Multi-tenant isolation.** `Tenants` gives each tenant a fully separate
+store — own log, own lock, own caches, own evaluation environment. Isolation
+is structural: a tenant's builtins close over that tenant's store and cannot
+name any other. Every MCP tool takes an optional `tenant` argument; validated
+names (`[a-z0-9][a-z0-9_-]{0,63}`) are the path-safety boundary.
+
 The library surface is exported from `src/index.ts` (`Store`, `memoryEnv`,
 `evaluate`, `read`, `print`, embedders).
 
@@ -128,22 +140,21 @@ with ~86% top-10 agreement vs exact, and the gap widens with size — scan is
 O(N), HNSW ~O(log N)). The index is derived state like everything else:
 never persisted, rebuilt at need, tombstones filtered at search time.
 
-## Status & roadmap
+## Status
 
-v0.5 implements the language (with `defmacro`/quasiquote), the two-layer store,
-semantic recall with importance scoring, reinforcement and decay, LLM-backed
-consolidation and entity extraction, the sleep cycle, log segmentation with
-snapshots, sandboxed procedural replay, automatic HNSW indexing, a REPL, and
-the MCP server. Still honest about gaps:
+v0.6 completes the design paper's scope: the language (with
+`defmacro`/quasiquote), the two-layer store, semantic recall with importance
+scoring, reinforcement and decay, LLM-backed consolidation and entity
+extraction, the sleep cycle, log segmentation with snapshots, Parquet
+compaction of archives, sandboxed procedural replay, automatic HNSW indexing,
+enforced single-writer locking, multi-tenant isolation, a REPL, and the MCP
+server. Remaining by-design boundaries:
 
-- Single-writer by design, now *enforced*: a lockfile (`<log>.lock`) makes a
-  second open of the same log fail fast instead of corrupting it; locks from
-  dead processes are stolen automatically. Concurrent multi-writer access is
-  out of scope for the file backend.
-- The MCP `eval` tool retains full access by design (the agent protocol is the
-  language); `replay` is sandboxed, but multi-tenant isolation does not exist.
-- Archives are kept but not yet queryable in place; planned: columnar
-  (Parquet) compaction of archives for the analytical tail.
+- Single-writer per store: the lockfile makes concurrent opens fail fast;
+  shared concurrent writing is out of scope for the file backend.
+- The MCP `eval` tool has full access *within its tenant* — the agent
+  protocol is the language; cross-tenant access is structurally impossible,
+  in-tenant `eval` is deliberately unrestricted.
 
 Pentagram is a standalone open-source framework (MIT): it depends on no
 product, and no product depends on it.

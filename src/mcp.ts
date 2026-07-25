@@ -18,14 +18,24 @@ import { read, print } from "./sexp.js";
 import { bestEmbedder, hashEmbedder, semanticEmbedder, disposeEmbedder } from "./embed.js";
 import { bestSummarizer, claudeSummarizer, extractiveSummarizer } from "./summarize.js";
 import { bestExtractor, claudeExtractor } from "./extract.js";
+import { Tenants } from "./tenants.js";
 
 const LOG_PATH = process.env.PENTAGRAM_LOG ?? "memory.pgram";
 
 let store: Store | null = null;
 let env: Env | null = null;
+let tenants: Tenants | null = null;
+const tenantEnvs = new Map<string, Env>();
 
-async function ensure(): Promise<Env> {
-  if (!env) {
+interface Config {
+  embedder: any;
+  summarizer: any;
+  extractor: any;
+}
+let cfg: Config | null = null;
+
+async function config(): Promise<Config> {
+  if (!cfg) {
     const embedder =
       process.env.PENTAGRAM_EMBEDDER === "hash" ? hashEmbedder
       : process.env.PENTAGRAM_EMBEDDER === "semantic" ? semanticEmbedder
@@ -38,7 +48,15 @@ async function ensure(): Promise<Env> {
       process.env.PENTAGRAM_EXTRACTOR === "off" ? null
       : process.env.PENTAGRAM_EXTRACTOR === "claude" ? claudeExtractor()
       : await bestExtractor();
-    store = await Store.open(LOG_PATH, embedder, summarizer, { extractor });
+    cfg = { embedder, summarizer, extractor };
+  }
+  return cfg;
+}
+
+async function ensure(): Promise<Env> {
+  if (!env) {
+    const c = await config();
+    store = await Store.open(LOG_PATH, c.embedder, c.summarizer, { extractor: c.extractor });
     env = memoryEnv(store);
 
     // Scheduled sleep: PENTAGRAM_SLEEP=<minutes> runs decay → extract →
@@ -53,6 +71,25 @@ async function ensure(): Promise<Env> {
     }
   }
   return env;
+}
+
+// Tenant isolation: `tenant` on any tool routes to a fully separate store
+// (own log/lock/caches/environment) under <log>.tenants/. No tenant = the
+// default store, exactly as before.
+async function resolve(tenant?: string): Promise<{ st: Store; e: Env }> {
+  if (!tenant) {
+    const e = await ensure();
+    return { st: store!, e };
+  }
+  const c = await config();
+  tenants ??= new Tenants(LOG_PATH + ".tenants", c.embedder, c.summarizer, { extractor: c.extractor });
+  const st = await tenants.get(tenant);
+  let e = tenantEnvs.get(tenant);
+  if (!e) {
+    e = memoryEnv(st);
+    tenantEnvs.set(tenant, e);
+  }
+  return { st, e };
 }
 
 const TOOLS = [
@@ -135,28 +172,36 @@ const TOOLS = [
   },
 ];
 
+// Every tool accepts an optional `tenant` for isolated per-tenant stores.
+for (const t of TOOLS) {
+  (t.inputSchema.properties as any).tenant = {
+    type: "string",
+    description: "optional isolated tenant store (lowercase alphanumeric, - and _)",
+  };
+}
+
 async function callTool(name: string, args: any): Promise<string> {
-  const e = await ensure();
+  const { st, e } = await resolve(args.tenant ? String(args.tenant) : undefined);
   const run = (src: string) => evaluate(read(src), e);
   switch (name) {
     case "remember": {
       if (args.code) return print(await run(`(remember '${args.code.trim()})`));
-      return print(await store!.remember(String(args.text ?? "")));
+      return print(await st.remember(String(args.text ?? "")));
     }
     case "recall": {
-      const results = await store!.recall(String(args.query), args.n ?? 5);
+      const results = await st.recall(String(args.query), args.n ?? 5);
       return print(results.map((r) => [r.id, Math.round(r.score * 1e4) / 1e4, r.episode.text]));
     }
     case "link": {
-      store!.link(String(args.src), String(args.rel), String(args.dst));
+      st.link(String(args.src), String(args.rel), String(args.dst));
       return "()";
     }
     case "hops":
-      return print(store!.hops(String(args.id), args.depth ?? 2).map((h) => [h.id, h.via]));
+      return print(st.hops(String(args.id), args.depth ?? 2).map((h) => [h.id, h.via]));
     case "stats":
-      return print(Object.entries(store!.stats()).map(([k, v]) => [k, v]));
+      return print(Object.entries(st.stats()).map(([k, v]) => [k, v]));
     case "sleep": {
-      const s = await store!.sleepCycle();
+      const s = await st.sleepCycle();
       return print(Object.entries(s).map(([k, v]) => [k, v]));
     }
     case "eval":
@@ -181,6 +226,7 @@ let closing = false;
 async function maybeExit(): Promise<void> {
   if (closing && pending === 0) {
     store?.close();
+    await tenants?.close();
     await disposeEmbedder();
     process.exit(0);
   }
@@ -216,7 +262,7 @@ async function handle(req: any): Promise<void> {
         respond({
           protocolVersion: params?.protocolVersion ?? "2025-06-18",
           capabilities: { tools: {} },
-          serverInfo: { name: "pentagram", version: "0.5.0" },
+          serverInfo: { name: "pentagram", version: "0.6.0" },
         });
         break;
       case "ping":
