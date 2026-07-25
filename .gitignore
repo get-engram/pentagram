@@ -2,3 +2,7 @@ node_modules/
 dist/
 *.pgram
 .DS_Store
+*.vecs.json
+*.lock
+*.archive
+*.parquet
