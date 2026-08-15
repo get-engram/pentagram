@@ -1,5 +1,5 @@
 export { Store } from "./store.js";
-export type { Episode, Trace, Link, Recalled, ConsolidateOptions, ExtractOptions, StoreOptions } from "./store.js";
+export type { Episode, Trace, Link, Recalled, ConsolidateOptions, ExtractOptions, StoreOptions, ProvRef } from "./store.js";
 export { claudeExtractor, bestExtractor, parseEntities } from "./extract.js";
 export type { Extractor, ExtractedEntity } from "./extract.js";
 export { memoryEnv } from "./memory.js";

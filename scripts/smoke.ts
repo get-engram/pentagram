@@ -141,6 +141,34 @@ assert(recallFact[0][0] === facts[0], "recall now surfaces the consolidated fact
 const prov: any = await run(`(provenance "${facts[0]}")`);
 assert(prov.length === 3, "(provenance fact-id) resolves from the language");
 
+console.log("\n— external provenance: claims with pointers —");
+const pf = await run(
+  `(fact! "acme's outstanding balance was disputed in march" ` +
+  `'((postgres "invoices/1234" 1755212000000) (episode "${a}")))`,
+);
+const srcs: any = await run(`(sources "${pf}")`);
+assert(srcs.length === 2, "structured provenance entries returned by (sources)");
+assert(print(srcs).includes("postgres") && print(srcs).includes("invoices/1234"),
+  "external reference round-trips through the log");
+const provRaw: any = await run(`(provenance "${pf}")`);
+assert(provRaw.length === 2, "(provenance) returns the full raw evidence list");
+const factRecall: any = await run(`(recall "dispute about the acme balance" 3)`);
+assert(factRecall.some((r: any) => r[0] === pf), "asserted fact is recallable");
+
+console.log("\n— revise: reconsolidation with a paper trail —");
+const rv = await run(
+  `(revise! "${pf}" "acme's dispute was resolved and paid on aug 12" ` +
+  `'((postgres "invoices/1234" 1755300000000)))`,
+);
+const afterRevise: any = await run(`(recall "acme balance dispute" 5)`);
+assert(afterRevise.some((r: any) => r[0] === rv), "successor fact surfaces in recall");
+assert(!afterRevise.some((r: any) => r[0] === pf), "superseded fact hidden from recall");
+assert(store.get(pf)!.forgotten && store.get(pf)!.text.includes("disputed in march"),
+  "superseded fact tombstoned but still in the store (log keeps everything)");
+const chain: any = await run(`(history "${rv}")`);
+assert(chain.length === 2 && chain[0][0] === rv && chain[1][0] === pf,
+  "(history) walks the supersedes chain newest-first");
+
 console.log("\n— entity extraction (stub extractor) —");
 const ex1 = await store.remember("met with sarah from globex about the migration project");
 const stubExtractor = async (text: string) => {
@@ -266,6 +294,9 @@ await tenants.close();
 fs.rmSync(TROOT, { recursive: true, force: true });
 
 console.log("\n— persistence: restart and refold the log —");
+// Capture immediately before restart: recalls in later sections may have
+// reinforced this trace again since the observation-is-a-write test ran.
+const preRestartCount = store.trace(a as string)!.recallCount;
 // The lockfile currently holds a fake dead pid (planted above): this reopen
 // must steal the stale lock instead of refusing.
 store = await Store.open(LOG, hashEmbedder);
@@ -273,8 +304,13 @@ assert(fs.readFileSync(LOG + ".lock", "utf8") === String(process.pid), "stale lo
 env = memoryEnv(store);
 const recall2: any = await run(`(recall "star schema dimensions" 1)`);
 assert(recall2[0][0] === b, "state survives restart (log refold)");
-assert(store.trace(a as string)!.recallCount === after, "reinforcement events survive restart");
+assert(store.trace(a as string)!.recallCount === preRestartCount, "reinforcement events survive restart");
 assert(store.get(facts[0])!.kind === "fact", "facts survive restart");
+assert(print(store.sources(rv as string)).includes("invoices/1234"),
+  "external provenance survives restart");
+const chainAfter = store.history(rv as string);
+assert(chainAfter.length === 2 && chainAfter[1].forgotten,
+  "supersedes chain survives restart, predecessor still tombstoned");
 assert(fs.existsSync(LOG + ".vecs.json"), "vector cache sidecar written");
 await show("(stats)");
 

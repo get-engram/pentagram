@@ -21,13 +21,19 @@ import { Summarizer, extractiveSummarizer } from "./summarize.js";
 import { Extractor } from "./extract.js";
 import { HNSW } from "./hnsw.js";
 
+// A provenance entry is either a bare episode id ("a1b2c3d4") or a structured
+// external reference: (system ref [as-of-ms]), e.g. (postgres "invoices/1234"
+// 1755212000000). Kept as raw Sexp — homoiconicity means provenance needs no
+// schema of its own; it prints, folds, and round-trips like everything else.
+export type ProvRef = Sexp;
+
 export interface Episode {
   id: string;
   ts: number;
   content: Sexp; // string atom or arbitrary expression (procedural memory)
   text: string; // printed form, used for embedding
   kind: "episode" | "fact" | "entity";
-  provenance?: string[]; // for facts: the episode ids consolidated into it
+  provenance?: ProvRef[]; // for facts: episode ids and/or external references
   forgotten: boolean;
 }
 
@@ -185,9 +191,26 @@ export class Store {
         const [id, ts, text, provenance] = rest;
         this.episodes.set(id, {
           id, ts, content: text, text, kind: "fact",
-          provenance: provenance as string[], forgotten: false,
+          provenance: provenance as ProvRef[], forgotten: false,
         });
         this.traces.set(id, { recallCount: 0, lastAccess: ts });
+        break;
+      }
+      // Reconsolidation: the successor fact replaces the predecessor in
+      // recall, the predecessor stays in the log forever, and a `supersedes`
+      // link records the chain — belief history is auditable, not overwritten.
+      case "revise": {
+        const [oldId, newId, ts, text, provenance] = rest;
+        this.episodes.set(newId, {
+          id: newId, ts, content: text, text, kind: "fact",
+          provenance: provenance as ProvRef[], forgotten: false,
+        });
+        this.traces.set(newId, { recallCount: 0, lastAccess: ts });
+        const old = this.episodes.get(oldId);
+        if (old) old.forgotten = true;
+        this.links.push({ src: newId, rel: "supersedes", dst: oldId });
+        this.degree.set(newId, (this.degree.get(newId) ?? 0) + 1);
+        this.degree.set(oldId, (this.degree.get(oldId) ?? 0) + 1);
         break;
       }
       case "entity": {
@@ -380,6 +403,56 @@ export class Store {
     this.append([sym("link"), src, sym(rel), dst]);
   }
 
+  // Assert a fact directly — the mechanism for memories ABOUT external
+  // systems of record: the claim lives here, the exact value stays there,
+  // and provenance carries the pointer for dereferencing.
+  async assertFact(text: string, provenance: ProvRef[] = [], ts = Date.now()): Promise<string> {
+    const id = randomUUID().slice(0, 8);
+    this.append([sym("fact"), id, ts, text, provenance]);
+    this.vecs.set(id, await this.embedder.embed(text));
+    this.indexInsert(id);
+    this.scheduleVecCacheSave();
+    return id;
+  }
+
+  // Supersede a belief. The old fact is tombstoned (never deleted), the new
+  // one takes its place in recall, and (history id) walks the chain.
+  async revise(oldId: string, text: string, provenance: ProvRef[] = [], ts = Date.now()): Promise<string> {
+    const old = this.episodes.get(oldId);
+    if (!old) throw new Error(`no memory ${oldId}`);
+    if (old.kind !== "fact" && old.kind !== "episode") {
+      throw new Error(`cannot revise a ${old.kind}`);
+    }
+    const id = randomUUID().slice(0, 8);
+    this.append([sym("revise"), oldId, id, ts, text, provenance]);
+    this.vecs.set(id, await this.embedder.embed(text));
+    this.indexInsert(id);
+    this.scheduleVecCacheSave();
+    return id;
+  }
+
+  /** External references in a memory's provenance (structured entries only). */
+  sources(id: string): ProvRef[] {
+    const ep = this.episodes.get(id);
+    if (!ep) throw new Error(`no memory ${id}`);
+    return (ep.provenance ?? []).filter((p: ProvRef) => Array.isArray(p));
+  }
+
+  /** The belief chain for a fact, newest first, following supersedes links. */
+  history(id: string): Episode[] {
+    const chain: Episode[] = [];
+    let cur: string | undefined = id;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
+      const ep = this.episodes.get(cur);
+      if (!ep) break;
+      chain.push(ep);
+      cur = this.links.find((l) => l.src === cur && l.rel === "supersedes")?.dst;
+    }
+    return chain;
+  }
+
   // Entities are first-class memories: recallable (they embed like anything
   // else), traversable (link episodes to them), and deduplicated by name+kind
   // so every mention converges on one node in the graph.
@@ -569,6 +642,12 @@ export class Store {
             await writer.appendRow({
               event: "link", src: rest[0],
               rel: rest[1] instanceof Sym ? rest[1].name : String(rest[1]), dst: rest[2], raw,
+            });
+            break;
+          case "revise":
+            await writer.appendRow({
+              event: "revise", id: rest[0], dst: rest[1], ts: rest[2],
+              text: typeof rest[3] === "string" ? rest[3] : print(rest[3]), raw,
             });
             break;
           default: // recalled, forget, extracted, trace

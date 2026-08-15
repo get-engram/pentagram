@@ -1,6 +1,6 @@
 {
   "name": "pentagram-db",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "A homoiconic memory substrate: episodic log, associative recall, graph links, and procedural memory in one S-expression language.",
   "type": "module",
   "main": "dist/index.js",

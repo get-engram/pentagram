@@ -117,6 +117,16 @@ loses history — and replaced by a compact snapshot of live state (episodes,
 facts, entities, links, trace summaries). Loads read snapshot + tail instead
 of all of history; archives remain on disk for audit and provenance.
 
+**External provenance & revision.** Pentagram can sit *over* existing systems
+of record without copying them: a fact is a **claim with pointers**, and its
+provenance may mix episode ids with structured external references —
+`(fact! "acme's balance was disputed" '((postgres "invoices/1234" 1755212000000)))`.
+Recall surfaces the claim; `(sources id)` gives the address to dereference for
+the exact current value. When the world changes, `(revise! id "new text" refs)`
+supersedes the belief: the successor takes over recall, the predecessor is
+tombstoned but never deleted, and `(history id)` walks the chain — "what did
+the system believe on March 3rd, and why?" is a query, not a forensics project.
+
 **Parquet compaction.** `(compact!)` converts archived segments to Parquet
 (optional `@dsnp/parquetjs` dependency): typed columns for the common
 queries plus a `raw` column holding every original S-expression line, so the
