@@ -12,3 +12,5 @@ export { extractiveSummarizer, claudeSummarizer, bestSummarizer } from "./summar
 export type { Summarizer } from "./summarize.js";
 export { HNSW } from "./hnsw.js";
 export { Tenants, validTenant } from "./tenants.js";
+export { FileBackend, MemoryBackend } from "./backend.js";
+export type { LogBackend } from "./backend.js";

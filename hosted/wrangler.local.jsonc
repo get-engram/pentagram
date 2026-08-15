@@ -1,0 +1,13 @@
+{
+  // Local development without Cloudflare auth: no AI binding, so the DO
+  // falls back to the hash embedder. Use: npx wrangler dev -c wrangler.local.jsonc
+  "name": "pentagram-hosted",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-05-03",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "PENTAGRAM", "class_name": "PentagramTenant" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PentagramTenant"] }],
+  "vars": { "API_KEYS": "dev-key:dev" }
+}

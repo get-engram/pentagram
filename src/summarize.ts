@@ -6,8 +6,8 @@
 //                          (claude -p). No SDK, no API key handling here; uses
 //                          whatever auth the CLI already has. Real compression.
 
-import { execFile } from "node:child_process";
-
+// node:child_process is imported dynamically inside the claude-CLI paths so
+// this module stays loadable on non-node runtimes (Workers use extractive).
 export type Summarizer = (texts: string[]) => Promise<string>;
 
 const MAX_CHARS = 800;
@@ -16,8 +16,9 @@ export const extractiveSummarizer: Summarizer = async (texts) =>
   (`consolidated from ${texts.length} episodes: ` + texts.join(" | ")).slice(0, MAX_CHARS);
 
 export function claudeSummarizer(model = "haiku"): Summarizer {
-  return (texts) =>
-    new Promise((resolve, reject) => {
+  return async (texts) => {
+    const { execFile } = await import("node:child_process");
+    return new Promise((resolve, reject) => {
       const prompt =
         "Consolidate these related memory episodes into ONE dense factual sentence " +
         "(max 60 words). Preserve concrete names, numbers, and dates. " +
@@ -34,13 +35,19 @@ export function claudeSummarizer(model = "haiku"): Summarizer {
         },
       );
     });
+  };
 }
 
 /** claudeSummarizer if the claude CLI is on PATH, else extractive. */
-export function bestSummarizer(): Promise<Summarizer> {
-  return new Promise((resolve) => {
-    execFile("claude", ["--version"], { timeout: 10_000 }, (err) =>
-      resolve(err ? extractiveSummarizer : claudeSummarizer()),
-    );
-  });
+export async function bestSummarizer(): Promise<Summarizer> {
+  try {
+    const { execFile } = await import("node:child_process");
+    return await new Promise((resolve) => {
+      execFile("claude", ["--version"], { timeout: 10_000 }, (err) =>
+        resolve(err ? extractiveSummarizer : claudeSummarizer()),
+      );
+    });
+  } catch {
+    return extractiveSummarizer;
+  }
 }

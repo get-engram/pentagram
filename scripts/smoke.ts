@@ -303,6 +303,27 @@ if (pqAvailable) {
 seg.close();
 segCleanup();
 
+console.log("\n— backend seam: Store over MemoryBackend —");
+const { MemoryBackend } = await import("../src/backend.js");
+const membk = new MemoryBackend();
+let mem = await Store.openWith(membk, hashEmbedder);
+const memId = await mem.remember("memory-backend memories live in RAM");
+const memFact = await mem.assertFact("backend seam works", [["test", "ref", 1]]);
+await mem.revise(memFact, "backend seam verified");
+mem.close();
+mem = await Store.openWith(membk, hashEmbedder); // refold from the same backend
+assert(mem.get(memId)?.text.includes("RAM") === true, "state refolds from a non-file backend");
+assert(mem.history(mem.stats().facts >= 1 ? [...(await mem.recall("backend seam", 1))][0].id : "").length === 2,
+  "belief chains work over MemoryBackend");
+let memLockRefused = false;
+try {
+  await Store.openWith(membk, hashEmbedder);
+} catch {
+  memLockRefused = true;
+}
+assert(memLockRefused, "MemoryBackend enforces single-writer too");
+mem.close();
+
 console.log("\n— multi-tenant isolation —");
 const TROOT = "smoke-tenants";
 fs.rmSync(TROOT, { recursive: true, force: true });

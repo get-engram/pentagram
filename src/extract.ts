@@ -3,7 +3,8 @@
 // LLM-backed extractor shells out to the `claude` CLI headless — and it
 // replies in S-expressions, parsed by pentagram's own reader. One language.
 
-import { execFile } from "node:child_process";
+// node:child_process is imported dynamically inside the claude-CLI paths so
+// this module stays loadable on non-node runtimes.
 import { readAll, Sym } from "./sexp.js";
 
 export interface ExtractedEntity {
@@ -16,8 +17,9 @@ export type Extractor = (text: string) => Promise<ExtractedEntity[]>;
 const KINDS = new Set(["person", "org", "client", "project", "place", "product", "thing"]);
 
 export function claudeExtractor(model = "haiku"): Extractor {
-  return (text) =>
-    new Promise((resolve, reject) => {
+  return async (text) => {
+    const { execFile } = await import("node:child_process");
+    return new Promise((resolve, reject) => {
       const prompt =
         "Extract the named entities from this memory episode. Reply ONLY with an " +
         'S-expression list of (name kind) pairs, e.g. (("acme corp" client) ("ahmad" person)). ' +
@@ -37,6 +39,7 @@ export function claudeExtractor(model = "haiku"): Extractor {
         },
       );
     });
+  };
 }
 
 /** Parse (("name" kind) ...) — tolerant of surrounding prose lines. */
@@ -76,10 +79,15 @@ function balancedPrefix(s: string): string {
 }
 
 /** claudeExtractor if the claude CLI is on PATH, else null (extraction off). */
-export function bestExtractor(): Promise<Extractor | null> {
-  return new Promise((resolve) => {
-    execFile("claude", ["--version"], { timeout: 10_000 }, (err) =>
-      resolve(err ? null : claudeExtractor()),
-    );
-  });
+export async function bestExtractor(): Promise<Extractor | null> {
+  try {
+    const { execFile } = await import("node:child_process");
+    return await new Promise((resolve) => {
+      execFile("claude", ["--version"], { timeout: 10_000 }, (err) =>
+        resolve(err ? null : claudeExtractor()),
+      );
+    });
+  } catch {
+    return null;
+  }
 }

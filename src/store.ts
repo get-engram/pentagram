@@ -12,10 +12,13 @@
 // derived (never logged) so the embedder stays swappable; a sidecar cache
 // (<log>.vecs.json, tagged by embedder) makes reopening cheap.
 
-import * as fs from "node:fs";
-import * as nodePath from "node:path";
-import { randomUUID } from "node:crypto";
+// NOTE: no node builtins here — Store is portable (node, Cloudflare Workers).
+// All I/O goes through LogBackend; node-specific code lives in backend.ts
+// (and behind dynamic imports for the file-only parquet compaction).
+import { LogBackend, FileBackend } from "./backend.js";
 import { Sexp, Sym, sym, readAll, print } from "./sexp.js";
+
+const randomUUID = (): string => (globalThis as any).crypto.randomUUID();
 import { Embedder, hashEmbedder, cosine } from "./embed.js";
 import { Summarizer, extractiveSummarizer } from "./summarize.js";
 import { Extractor } from "./extract.js";
@@ -94,27 +97,34 @@ export class Store {
   private index: HNSW | null = null; // derived, disposable, built past ANN_THRESHOLD
 
   private constructor(
-    private path: string,
+    private backend: LogBackend,
     readonly embedder: Embedder,
     readonly summarizer: Summarizer,
     readonly extractor: Extractor | null,
     private maxLogBytes: number,
-    private fsync: boolean,
   ) {}
 
-  private fd: number | null = null; // persistent append fd (fsync mode only)
-
-  /** Open (or create) a store: fold the log, then derive/restore embeddings. */
-  static async open(
+  /** Open (or create) a file-backed store (the local default). */
+  static open(
     path: string,
     embedder: Embedder = hashEmbedder,
     summarizer: Summarizer = extractiveSummarizer,
     opts: StoreOptions = {},
   ): Promise<Store> {
-    const s = new Store(path, embedder, summarizer, opts.extractor ?? null,
-      opts.maxLogBytes ?? DEFAULT_MAX_LOG_BYTES, opts.fsync ?? false);
-    s.acquireLock();
-    if (fs.existsSync(path)) {
+    return Store.openWith(new FileBackend(path, opts.fsync ?? false), embedder, summarizer, opts);
+  }
+
+  /** Open a store over any LogBackend (Durable Object SQLite, memory, …). */
+  static async openWith(
+    backend: LogBackend,
+    embedder: Embedder = hashEmbedder,
+    summarizer: Summarizer = extractiveSummarizer,
+    opts: StoreOptions = {},
+  ): Promise<Store> {
+    const s = new Store(backend, embedder, summarizer, opts.extractor ?? null,
+      opts.maxLogBytes ?? DEFAULT_MAX_LOG_BYTES);
+    backend.lock();
+    if (backend.exists()) {
       s.loadAndFold();
       s.maybeRollover();
     }
@@ -130,7 +140,7 @@ export class Store {
   // quarantine the bytes (<log>.torn-<ts>) and truncate — recovery, not data
   // loss. A malformed line anywhere ELSE is real corruption: fail loudly.
   private loadAndFold(): void {
-    const lines = fs.readFileSync(this.path, "utf8").split("\n");
+    const lines = this.backend.readText().split("\n");
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
@@ -140,47 +150,15 @@ export class Store {
       } catch (e: any) {
         const isLastContent = lines.slice(i + 1).every((l) => !l.trim());
         if (isLastContent) {
-          fs.writeFileSync(`${this.path}.torn-${Date.now()}`, lines[i]);
-          fs.writeFileSync(this.path, i ? lines.slice(0, i).join("\n") + "\n" : "");
+          this.backend.writeAux(`torn-${Date.now()}`, lines[i]);
+          this.backend.replaceActive(i ? lines.slice(0, i).join("\n") + "\n" : "");
           return;
         }
-        throw new Error(`corrupt log ${this.path} at line ${i + 1}: ${e.message}`);
+        throw new Error(`corrupt log ${this.backend.describe()} at line ${i + 1}: ${e.message}`);
       }
       for (const ev of events) this.fold(ev);
     }
   }
-
-  // ---------- single-writer lock ----------
-  //
-  // The append-only log has exactly one writer. A lockfile (<log>.lock,
-  // holding the owner pid) makes that a checked invariant instead of a hope:
-  // a second open of the same log throws. Locks from dead processes are
-  // stolen automatically, so crashes never wedge the store.
-
-  private lockPath(): string {
-    return this.path + ".lock";
-  }
-
-  private acquireLock(): void {
-    const tryAcquire = () =>
-      fs.writeFileSync(this.lockPath(), String(process.pid), { flag: "wx" });
-    try {
-      tryAcquire();
-    } catch (e: any) {
-      if (e.code !== "EEXIST") throw e;
-      const holder = Number(fs.readFileSync(this.lockPath(), "utf8"));
-      // Our own pid counts as a live holder too: a second Store instance in
-      // the same process is still a second writer.
-      if (holder && (holder === process.pid || isAlive(holder))) {
-        throw new Error(`memory log ${this.path} is locked by running process ${holder}`);
-      }
-      fs.unlinkSync(this.lockPath()); // stale (dead holder): steal it
-      tryAcquire();
-    }
-    this.locked = true;
-  }
-
-  private locked = false;
 
   /** Flush derived caches and release the writer lock. */
   close(): void {
@@ -189,33 +167,14 @@ export class Store {
       this.cacheTimer = null;
     }
     this.flush();
-    if (this.fd !== null) {
-      fs.closeSync(this.fd);
-      this.fd = null;
-    }
-    if (this.locked) {
-      try {
-        if (Number(fs.readFileSync(this.lockPath(), "utf8")) === process.pid) {
-          fs.unlinkSync(this.lockPath());
-        }
-      } catch {
-        /* already gone */
-      }
-      this.locked = false;
-    }
+    this.backend.close();
+    this.backend.unlock();
   }
 
   // ---------- exact layer ----------
 
   private append(event: Sexp): void {
-    const line = print(event) + "\n";
-    if (this.fsync) {
-      if (this.fd === null) this.fd = fs.openSync(this.path, "a");
-      fs.writeSync(this.fd, line);
-      fs.fsyncSync(this.fd);
-    } else {
-      fs.appendFileSync(this.path, line);
-    }
+    this.backend.appendLine(print(event) + "\n");
     this.fold(event);
   }
 
@@ -325,9 +284,8 @@ export class Store {
   // extraction markers. Loads then read snapshot + tail, not all of history.
 
   private maybeRollover(): void {
-    if (fs.statSync(this.path).size <= this.maxLogBytes) return;
-    const archive = `${this.path}.${Date.now()}.archive`;
-    fs.renameSync(this.path, archive);
+    if (this.backend.sizeBytes() <= this.maxLogBytes) return;
+    this.backend.archiveActive(String(Date.now()));
 
     const lines: string[] = [];
     // Retain live memories PLUS the belief chains behind them: a tombstoned
@@ -375,7 +333,7 @@ export class Store {
       if (liveIds.has(l.src) && liveIds.has(l.dst))
         lines.push(print([sym("link"), l.src, sym(l.rel), l.dst]));
     }
-    fs.writeFileSync(this.path, lines.join("\n") + "\n");
+    this.backend.replaceActive(lines.join("\n") + "\n");
 
     // Refold from the snapshot so in-memory state matches the new active file
     // (dropped tombstones, pruned dangling links).
@@ -390,18 +348,16 @@ export class Store {
 
   // ---------- derived embeddings + sidecar cache ----------
 
-  private vecCachePath(): string {
-    return this.path + ".vecs.json";
-  }
-
   private loadVecCache(): void {
     try {
-      const raw = JSON.parse(fs.readFileSync(this.vecCachePath(), "utf8"));
+      const text = this.backend.readAux("vecs.json");
+      if (!text) return;
+      const raw = JSON.parse(text);
       if (raw.embedder !== this.embedder.name) return; // embedder changed: re-derive
       for (const [id, b64] of Object.entries<string>(raw.vecs)) {
         if (this.episodes.has(id)) {
-          const buf = Buffer.from(b64, "base64");
-          this.vecs.set(id, new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4));
+          const bytes = base64ToBytes(b64);
+          this.vecs.set(id, new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4));
         }
       }
     } catch {
@@ -412,9 +368,9 @@ export class Store {
   private saveVecCache(): void {
     const vecs: Record<string, string> = {};
     for (const [id, v] of this.vecs) {
-      vecs[id] = Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString("base64");
+      vecs[id] = bytesToBase64(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
     }
-    fs.writeFileSync(this.vecCachePath(), JSON.stringify({ embedder: this.embedder.name, vecs }));
+    this.backend.writeAux("vecs.json", JSON.stringify({ embedder: this.embedder.name, vecs }));
     this.cacheDirty = false;
   }
 
@@ -709,11 +665,10 @@ export class Store {
   // @dsnp/parquetjs dependency.
   async compactArchives(opts: { remove?: boolean } = {}): Promise<string[]> {
     const { remove = true } = opts;
-    const dir = nodePath.dirname(nodePath.resolve(this.path));
-    const base = nodePath.basename(this.path);
-    const archives = fs.readdirSync(dir)
-      .filter((f) => f.startsWith(base + ".") && f.endsWith(".archive"))
-      .map((f) => nodePath.join(dir, f));
+    if (!this.backend.listArchives || !this.backend.readArchive || !this.backend.archiveOutPath) {
+      throw new Error(`backend ${this.backend.describe()} does not support archive compaction`);
+    }
+    const archives = this.backend.listArchives();
     if (!archives.length) return [];
 
     let pw: any;
@@ -736,12 +691,12 @@ export class Store {
 
     const written: string[] = [];
     for (const archive of archives) {
-      const out = archive.replace(/\.archive$/, ".parquet");
+      const out = this.backend.archiveOutPath(archive);
       const rows: Row[] = [];
       const push = (r: Partial<Row> & { event: string; raw: string }) =>
         rows.push({ id: null, ts: null, text: null, src: null, rel: null, dst: null, ...r });
 
-      for (const event of readAll(fs.readFileSync(archive, "utf8"))) {
+      for (const event of readAll(this.backend.readArchive(archive))) {
         const [tag, ...rest] = event as [Sym, ...Sexp[]];
         const raw = print(event);
         switch (tag.name) {
@@ -784,7 +739,7 @@ export class Store {
           col("dst", "STRING"), col("raw", "STRING"),
         ],
       });
-      if (remove) fs.unlinkSync(archive);
+      if (remove) this.backend.removeArchive!(archive);
       written.push(out);
     }
     return written;
@@ -857,11 +812,21 @@ export class Store {
   }
 }
 
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
+// Portable base64 (node Buffer when present, btoa/atob otherwise — Workers).
+function bytesToBase64(bytes: Uint8Array): string {
+  if (typeof Buffer !== "undefined") return Buffer.from(bytes).toString("base64");
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  if (typeof Buffer !== "undefined") {
+    const buf = Buffer.from(b64, "base64");
+    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
   }
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
