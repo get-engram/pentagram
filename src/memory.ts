@@ -100,6 +100,14 @@ export function memoryEnv(store: Store): Env {
     return evaluate(ep.content, env);
   });
 
+  // (touch! id) — mark a memory as actually used: reinforces it directly.
+  // Recall reinforces whatever it surfaces; touch! is the agent saying
+  // "this one mattered."
+  def("touch!", (id) => {
+    store.touch(String(id));
+    return [];
+  });
+
   // (decay!) -> ids tombstoned this pass
   def("decay!", () => store.decay());
 

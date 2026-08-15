@@ -145,8 +145,12 @@ names (`[a-z0-9][a-z0-9_-]{0,63}`) are the path-safety boundary.
 The library surface is exported from `src/index.ts` (`Store`, `memoryEnv`,
 `evaluate`, `read`, `print`, embedders).
 
-**Scale.** Recall scores `similarity × recency × strength × importance`
-(importance grows with link degree — well-connected memories are load-bearing).
+**Scale.** Recall scores `similarity² × recency × strength × importance` —
+similarity squared so relevance dominates and usage signals break near-ties
+(the linear formula measurably lost to bare similarity; see
+[docs/eval.md](docs/eval.md)). Strength grows log-damped with use: passive
+recall reinforces what surfaces, and `(touch! id)` is the agent's explicit
+"this one mattered" (worth 3 recalls). Importance grows with link degree.
 Small stores use an exact scan; past 2,000 live memories a pure-TypeScript
 HNSW index builds automatically (`npm run bench`: ~4x faster at 5k episodes
 with ~86% top-10 agreement vs exact, and the gap widens with size — scan is

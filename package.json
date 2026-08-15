@@ -1,6 +1,6 @@
 {
   "name": "pentagram-db",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "A homoiconic memory substrate: episodic log, associative recall, graph links, and procedural memory in one S-expression language.",
   "type": "module",
   "main": "dist/index.js",
@@ -20,7 +20,8 @@
     "smoke": "tsx scripts/smoke.ts",
     "semantic-check": "tsx scripts/semantic-check.ts",
     "bench": "tsx scripts/bench.ts",
-    "fuzz": "tsx scripts/fuzz.ts"
+    "fuzz": "tsx scripts/fuzz.ts",
+    "eval": "tsx scripts/eval.ts"
   },
   "keywords": [
     "memory",

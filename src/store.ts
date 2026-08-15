@@ -75,8 +75,9 @@ export interface StoreOptions {
 }
 
 const HALF_LIFE_HOURS = 24 * 30; // recency halves every 30 days
-const REINFORCE_WEIGHT = 0.25; // each recall adds 25% strength
+const REINFORCE_WEIGHT = 0.5; // reinforcement weight (log-damped: 10 recalls ≈ 2.2x, 100 ≈ 3.3x)
 const DEGREE_WEIGHT = 0.15; // importance: well-connected memories rank higher
+const TOUCH_WEIGHT = 3; // one explicit touch counts as this many passive recalls
 const ANN_THRESHOLD = 2000; // below this, exact full scan; above, HNSW
 const ANN_OVERSAMPLE = 8; // fetch n*this from the index before rescoring
 const DEFAULT_MAX_LOG_BYTES = 10 * 1024 * 1024; // roll the active log at 10 MB
@@ -276,6 +277,18 @@ export class Store {
         const t = this.traces.get(id);
         if (t) {
           t.recallCount += 1;
+          t.lastAccess = ts;
+        }
+        break;
+      }
+      // Explicit use: the agent said "this one mattered." Weighted heavier
+      // than passive surfacing (recall reinforces lexical traps too) so the
+      // feedback signal can actually separate the used from the surfaced.
+      case "touched": {
+        const [id, ts] = rest;
+        const t = this.traces.get(id);
+        if (t) {
+          t.recallCount += TOUCH_WEIGHT;
           t.lastAccess = ts;
         }
         break;
@@ -561,9 +574,20 @@ export class Store {
       const t = this.traces.get(ep.id)!;
       const ageHours = Math.max(0, now - t.lastAccess) / 3_600_000;
       const recency = Math.pow(0.5, ageHours / HALF_LIFE_HOURS);
-      const strength = 1 + REINFORCE_WEIGHT * t.recallCount;
+      const strength = 1 + REINFORCE_WEIGHT * Math.log1p(t.recallCount);
       const importance = 1 + DEGREE_WEIGHT * Math.log1p(this.degree.get(ep.id) ?? 0);
-      return { id: ep.id, score: similarity * recency * strength * importance, similarity, episode: ep };
+      // Similarity is squared: relevance must dominate, with usage signals
+      // (recency/strength/importance) breaking near-ties rather than letting
+      // a much-used memory hijack an unrelated query. Linear similarity with
+      // linear strength measurably LOST to similarity-only retrieval on the
+      // eval harness (hot memories drowned quiet correct answers); this
+      // calibration wins. See scripts/eval.ts and docs/eval.md.
+      return {
+        id: ep.id,
+        score: similarity * similarity * recency * strength * importance,
+        similarity,
+        episode: ep,
+      };
     };
 
     let scored: Recalled[];
@@ -582,6 +606,16 @@ export class Store {
     const top = scored.slice(0, n).filter((r) => r.similarity > 0);
     for (const r of top) this.append([sym("recalled"), r.id, now]);
     return top;
+  }
+
+  // Explicit reinforcement: the agent signals "this memory was actually
+  // useful" — a stronger, cleaner signal than surfacing (recall reinforces
+  // whatever it returned, lexical traps included). Same event as a recall;
+  // usage is usage.
+  touch(id: string, now = Date.now()): void {
+    const ep = this.episodes.get(id);
+    if (!ep) throw new Error(`no memory ${id}`);
+    this.append([sym("touched"), id, now]);
   }
 
   // Graph traversal: ids reachable within `depth` hops, with the relation path.

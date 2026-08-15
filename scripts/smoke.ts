@@ -61,6 +61,9 @@ const before = store.trace(a as string)!.recallCount;
 await run(`(recall "warehouse cost" 1)`);
 const after = store.trace(a as string)!.recallCount;
 assert(after > before, `recall reinforced the trace (count ${before} → ${after})`);
+await run(`(touch! "${a}")`);
+assert(store.trace(a as string)!.recallCount === after + 3,
+  "explicit touch counts as 3 passive recalls (stronger signal)");
 
 console.log("\n— graph layer —");
 await run(`(link "${a}" 'about "${c}")`);
