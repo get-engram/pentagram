@@ -7,7 +7,9 @@
     "bindings": [{ "name": "PENTAGRAM", "class_name": "PentagramTenant" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PentagramTenant"] }],
-  "ai": { "binding": "AI" },
-  // Development only — in production: npx wrangler secret put API_KEYS
-  "vars": { "API_KEYS": "dev-key:dev" }
+  "ai": { "binding": "AI" }
+  // API_KEYS is a secret in production (npx wrangler secret put API_KEYS,
+  // format "key1:tenant1,key2:tenant2"). Deliberately NOT a var here: a
+  // config var with the same name would overwrite the secret on every
+  // deploy. Local dev uses wrangler.local.jsonc, which sets it as a var.
 }
