@@ -19,7 +19,8 @@
     "mcp": "tsx src/mcp.ts",
     "smoke": "tsx scripts/smoke.ts",
     "semantic-check": "tsx scripts/semantic-check.ts",
-    "bench": "tsx scripts/bench.ts"
+    "bench": "tsx scripts/bench.ts",
+    "fuzz": "tsx scripts/fuzz.ts"
   },
   "keywords": [
     "memory",

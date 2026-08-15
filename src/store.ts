@@ -71,6 +71,7 @@ export interface ExtractOptions {
 export interface StoreOptions {
   extractor?: Extractor | null; // default entity extractor (null = extraction off)
   maxLogBytes?: number; // active-log rollover threshold; Infinity disables
+  fsync?: boolean; // fsync every append (durability over throughput); default off
 }
 
 const HALF_LIFE_HOURS = 24 * 30; // recency halves every 30 days
@@ -97,7 +98,10 @@ export class Store {
     readonly summarizer: Summarizer,
     readonly extractor: Extractor | null,
     private maxLogBytes: number,
+    private fsync: boolean,
   ) {}
+
+  private fd: number | null = null; // persistent append fd (fsync mode only)
 
   /** Open (or create) a store: fold the log, then derive/restore embeddings. */
   static async open(
@@ -107,16 +111,42 @@ export class Store {
     opts: StoreOptions = {},
   ): Promise<Store> {
     const s = new Store(path, embedder, summarizer, opts.extractor ?? null,
-      opts.maxLogBytes ?? DEFAULT_MAX_LOG_BYTES);
+      opts.maxLogBytes ?? DEFAULT_MAX_LOG_BYTES, opts.fsync ?? false);
     s.acquireLock();
     if (fs.existsSync(path)) {
-      for (const event of readAll(fs.readFileSync(path, "utf8"))) s.fold(event);
+      s.loadAndFold();
       s.maybeRollover();
     }
     s.loadVecCache();
     await s.ensureVecs();
     s.saveVecCache();
     return s;
+  }
+
+  // Crash-safe load. Events are one per line by construction (print() escapes
+  // newlines), so the log parses line-by-line. A malformed FINAL line is a
+  // torn write from a crash mid-append: the event was never durable, so we
+  // quarantine the bytes (<log>.torn-<ts>) and truncate — recovery, not data
+  // loss. A malformed line anywhere ELSE is real corruption: fail loudly.
+  private loadAndFold(): void {
+    const lines = fs.readFileSync(this.path, "utf8").split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      let events: Sexp[];
+      try {
+        events = readAll(line);
+      } catch (e: any) {
+        const isLastContent = lines.slice(i + 1).every((l) => !l.trim());
+        if (isLastContent) {
+          fs.writeFileSync(`${this.path}.torn-${Date.now()}`, lines[i]);
+          fs.writeFileSync(this.path, i ? lines.slice(0, i).join("\n") + "\n" : "");
+          return;
+        }
+        throw new Error(`corrupt log ${this.path} at line ${i + 1}: ${e.message}`);
+      }
+      for (const ev of events) this.fold(ev);
+    }
   }
 
   // ---------- single-writer lock ----------
@@ -158,6 +188,10 @@ export class Store {
       this.cacheTimer = null;
     }
     this.flush();
+    if (this.fd !== null) {
+      fs.closeSync(this.fd);
+      this.fd = null;
+    }
     if (this.locked) {
       try {
         if (Number(fs.readFileSync(this.lockPath(), "utf8")) === process.pid) {
@@ -173,7 +207,14 @@ export class Store {
   // ---------- exact layer ----------
 
   private append(event: Sexp): void {
-    fs.appendFileSync(this.path, print(event) + "\n");
+    const line = print(event) + "\n";
+    if (this.fsync) {
+      if (this.fd === null) this.fd = fs.openSync(this.path, "a");
+      fs.writeSync(this.fd, line);
+      fs.fsyncSync(this.fd);
+    } else {
+      fs.appendFileSync(this.path, line);
+    }
     this.fold(event);
   }
 
@@ -331,7 +372,7 @@ export class Store {
     this.degree.clear();
     this.entityIds.clear();
     this.extracted.clear();
-    for (const event of readAll(fs.readFileSync(this.path, "utf8"))) this.fold(event);
+    this.loadAndFold();
   }
 
   // ---------- derived embeddings + sidecar cache ----------

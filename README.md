@@ -1,5 +1,8 @@
 # ⛧ pentagram
 
+[![ci](https://github.com/get-engram/pentagram/actions/workflows/ci.yml/badge.svg)](https://github.com/get-engram/pentagram/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/pentagram-db)](https://www.npmjs.com/package/pentagram-db)
+
 A homoiconic memory substrate for AI systems. No database underneath, no
 dependencies, no impedance layers: the query language, the data model, and the
 on-disk format are all the same thing — S-expressions.

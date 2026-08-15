@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      # Skip heavy optionals (transformers/onnx ~hundreds of MB; smoke uses
+      # the hash embedder), but install the small pure-JS parquet pair so the
+      # compaction round-trip stays covered.
+      - run: npm ci --omit=optional
+      - run: npm install --no-save hyparquet-writer hyparquet
+      - run: npx tsc --noEmit
+      - run: npm run smoke
+      - run: npm run fuzz
+        env:
+          FUZZ_EXPRS: "1500"
+          FUZZ_SEQS: "12"
+          FUZZ_TORN: "8"

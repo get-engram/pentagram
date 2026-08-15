@@ -61,7 +61,10 @@ let mainPromise: Promise<Session> | null = null;
 function mainSession(): Promise<Session> {
   return (mainPromise ??= (async () => {
     const c = await config();
-    const st = await Store.open(LOG_PATH, c.embedder, c.summarizer, { extractor: c.extractor });
+    const st = await Store.open(LOG_PATH, c.embedder, c.summarizer, {
+      extractor: c.extractor,
+      fsync: process.env.PENTAGRAM_FSYNC === "1",
+    });
 
     // Scheduled sleep: PENTAGRAM_SLEEP=<minutes> runs decay → extract →
     // consolidate on a timer. Off by default (extraction/summarization may
