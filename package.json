@@ -46,8 +46,9 @@
   ],
   "license": "MIT",
   "optionalDependencies": {
-    "@dsnp/parquetjs": "^1.8.8",
-    "@huggingface/transformers": "^3.0.0"
+    "@huggingface/transformers": "^3.0.0",
+    "hyparquet": "^1.28.2",
+    "hyparquet-writer": "^0.16.6"
   },
   "devDependencies": {
     "@types/node": "^20.19.0",

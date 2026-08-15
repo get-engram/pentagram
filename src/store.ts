@@ -276,9 +276,28 @@ export class Store {
     fs.renameSync(this.path, archive);
 
     const lines: string[] = [];
-    const live = [...this.episodes.values()]
-      .filter((e) => !e.forgotten)
-      .sort((a, b) => a.ts - b.ts);
+    // Retain live memories PLUS the belief chains behind them: a tombstoned
+    // predecessor reachable via supersedes links from a live fact must survive
+    // the snapshot (with its tombstone), or rollover would silently destroy
+    // the revise paper trail — (history) would truncate and (sources oldId)
+    // would throw, making audit answers depend on when rollover fired.
+    const retained = new Map(
+      [...this.episodes.values()].filter((e) => !e.forgotten).map((e) => [e.id, e]),
+    );
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const l of this.links) {
+        if (l.rel === "supersedes" && retained.has(l.src) && !retained.has(l.dst)) {
+          const ep = this.episodes.get(l.dst);
+          if (ep) {
+            retained.set(ep.id, ep);
+            grew = true;
+          }
+        }
+      }
+    }
+    const live = [...retained.values()].sort((a, b) => a.ts - b.ts);
     for (const e of live) {
       if (e.kind === "fact") lines.push(print([sym("fact"), e.id, e.ts, e.text, e.provenance ?? []]));
       else if (e.kind === "entity") {
@@ -287,6 +306,10 @@ export class Store {
       } else lines.push(print([sym("episode"), e.id, e.ts, e.content]));
     }
     const liveIds = new Set(live.map((e) => e.id));
+    // Re-tombstone retained-but-forgotten chain predecessors.
+    for (const e of live) {
+      if (e.forgotten) lines.push(print([sym("forget"), e.id, Date.now()]));
+    }
     for (const [id, t] of this.traces) {
       if (liveIds.has(id) && t.recallCount > 0)
         lines.push(print([sym("trace"), id, t.recallCount, t.lastAccess]));
@@ -407,6 +430,8 @@ export class Store {
   // systems of record: the claim lives here, the exact value stays there,
   // and provenance carries the pointer for dereferencing.
   async assertFact(text: string, provenance: ProvRef[] = [], ts = Date.now()): Promise<string> {
+    if (typeof text !== "string" || !text.trim()) throw new Error("fact text must be a non-empty string");
+    if (!Array.isArray(provenance)) throw new Error("provenance must be a list of refs");
     const id = randomUUID().slice(0, 8);
     this.append([sym("fact"), id, ts, text, provenance]);
     this.vecs.set(id, await this.embedder.embed(text));
@@ -418,10 +443,18 @@ export class Store {
   // Supersede a belief. The old fact is tombstoned (never deleted), the new
   // one takes its place in recall, and (history id) walks the chain.
   async revise(oldId: string, text: string, provenance: ProvRef[] = [], ts = Date.now()): Promise<string> {
+    if (typeof text !== "string" || !text.trim()) throw new Error("revised text must be a non-empty string");
+    if (!Array.isArray(provenance)) throw new Error("provenance must be a list of refs");
     const old = this.episodes.get(oldId);
     if (!old) throw new Error(`no memory ${oldId}`);
     if (old.kind !== "fact" && old.kind !== "episode") {
       throw new Error(`cannot revise a ${old.kind}`);
+    }
+    // Superseded facts must not be revised — that would fork the chain into
+    // two live contradictory heads. (Merely decayed/forgotten facts MAY be
+    // revised: a faded belief can legitimately be revived by new evidence.)
+    if (this.links.some((l) => l.rel === "supersedes" && l.dst === oldId)) {
+      throw new Error(`${oldId} is already superseded; revise the chain head (see (history ...))`);
     }
     const id = randomUUID().slice(0, 8);
     this.append([sym("revise"), oldId, id, ts, text, provenance]);
@@ -431,11 +464,16 @@ export class Store {
     return id;
   }
 
-  /** External references in a memory's provenance (structured entries only). */
+  /** External references in a memory's provenance — structured entries that
+   *  point OUTSIDE the store (episode-refs are internal and excluded). */
   sources(id: string): ProvRef[] {
     const ep = this.episodes.get(id);
     if (!ep) throw new Error(`no memory ${id}`);
-    return (ep.provenance ?? []).filter((p: ProvRef) => Array.isArray(p));
+    return (ep.provenance ?? []).filter((p: ProvRef) => {
+      if (!Array.isArray(p)) return false;
+      const head = p[0] instanceof Sym ? p[0].name : p[0];
+      return head !== "episode";
+    });
   }
 
   /** The belief chain for a fact, newest first, following supersedes links. */
@@ -603,58 +641,74 @@ export class Store {
       .map((f) => nodePath.join(dir, f));
     if (!archives.length) return [];
 
-    let pq: any;
+    let pw: any;
     try {
-      pq = await import("@dsnp/parquetjs");
+      pw = await import("hyparquet-writer");
     } catch {
-      throw new Error("archive compaction needs the optional dependency @dsnp/parquetjs");
+      throw new Error("archive compaction needs the optional dependency hyparquet-writer");
     }
-    const schema = new pq.ParquetSchema({
-      event: { type: "UTF8" },
-      id: { type: "UTF8", optional: true },
-      ts: { type: "DOUBLE", optional: true },
-      text: { type: "UTF8", optional: true },
-      src: { type: "UTF8", optional: true },
-      rel: { type: "UTF8", optional: true },
-      dst: { type: "UTF8", optional: true },
-      raw: { type: "UTF8" },
-    });
+
+    interface Row {
+      event: string;
+      id: string | null;
+      ts: number | null;
+      text: string | null;
+      src: string | null;
+      rel: string | null;
+      dst: string | null;
+      raw: string;
+    }
 
     const written: string[] = [];
     for (const archive of archives) {
       const out = archive.replace(/\.archive$/, ".parquet");
-      const writer = await pq.ParquetWriter.openFile(schema, out);
+      const rows: Row[] = [];
+      const push = (r: Partial<Row> & { event: string; raw: string }) =>
+        rows.push({ id: null, ts: null, text: null, src: null, rel: null, dst: null, ...r });
+
       for (const event of readAll(fs.readFileSync(archive, "utf8"))) {
         const [tag, ...rest] = event as [Sym, ...Sexp[]];
         const raw = print(event);
         switch (tag.name) {
           case "episode":
           case "fact":
-            await writer.appendRow({
+            push({
               event: tag.name, id: rest[0], ts: rest[1],
               text: typeof rest[2] === "string" ? rest[2] : print(rest[2]), raw,
             });
             break;
           case "entity":
-            await writer.appendRow({ event: "entity", id: rest[0], ts: rest[1], text: String(rest[2]), raw });
+            push({ event: "entity", id: rest[0], ts: rest[1], text: String(rest[2]), raw });
             break;
           case "link":
-            await writer.appendRow({
+            push({
               event: "link", src: rest[0],
               rel: rest[1] instanceof Sym ? rest[1].name : String(rest[1]), dst: rest[2], raw,
             });
             break;
           case "revise":
-            await writer.appendRow({
-              event: "revise", id: rest[0], dst: rest[1], ts: rest[2],
+            // id = the fact this event CREATED (successor); src = superseded.
+            push({
+              event: "revise", id: rest[1], src: rest[0], ts: rest[2],
               text: typeof rest[3] === "string" ? rest[3] : print(rest[3]), raw,
             });
             break;
           default: // recalled, forget, extracted, trace
-            await writer.appendRow({ event: tag.name, id: rest[0], ts: typeof rest[1] === "number" ? rest[1] : undefined, raw });
+            push({ event: tag.name, id: rest[0], ts: typeof rest[1] === "number" ? rest[1] : null, raw });
         }
       }
-      await writer.close();
+
+      const col = (name: keyof Row, type: string) => ({
+        name, type, nullable: true, data: rows.map((r) => r[name]),
+      });
+      pw.parquetWriteFile({
+        filename: out,
+        columnData: [
+          col("event", "STRING"), col("id", "STRING"), col("ts", "DOUBLE"),
+          col("text", "STRING"), col("src", "STRING"), col("rel", "STRING"),
+          col("dst", "STRING"), col("raw", "STRING"),
+        ],
+      });
       if (remove) fs.unlinkSync(archive);
       written.push(out);
     }

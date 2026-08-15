@@ -128,7 +128,7 @@ tombstoned but never deleted, and `(history id)` walks the chain — "what did
 the system believe on March 3rd, and why?" is a query, not a forensics project.
 
 **Parquet compaction.** `(compact!)` converts archived segments to Parquet
-(optional `@dsnp/parquetjs` dependency): typed columns for the common
+(optional `hyparquet-writer` dependency): typed columns for the common
 queries plus a `raw` column holding every original S-expression line, so the
 conversion is lossless. The cold tail joins the composable stack — DuckDB,
 Spark, anything that reads Parquet can query pentagram's history in place.

@@ -99,11 +99,22 @@ function tokenize(src: string): string[] {
 
 function atom(tok: string): Sexp {
   if (tok.startsWith('"')) {
-    return tok
-      .slice(1, -1)
-      .replace(/\\"/g, '"')
-      .replace(/\\n/g, "\n")
-      .replace(/\\\\/g, "\\");
+    // Single-pass unescape. Sequential .replace() passes corrupt strings
+    // like "C:\\new" — the \n pass would eat the second backslash of an
+    // escaped \\ followed by a literal 'n', breaking print/read round-trip
+    // and therefore fold determinism.
+    const body = tok.slice(1, -1);
+    let out = "";
+    for (let i = 0; i < body.length; i++) {
+      const c = body[i];
+      if (c === "\\" && i + 1 < body.length) {
+        const n = body[++i];
+        out += n === "n" ? "\n" : n; // \n -> newline; \" -> "; \\ -> backslash
+      } else {
+        out += c;
+      }
+    }
+    return out;
   }
   if (tok === "true") return true;
   if (tok === "false") return false;

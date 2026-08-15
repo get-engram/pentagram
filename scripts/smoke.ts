@@ -147,7 +147,7 @@ const pf = await run(
   `'((postgres "invoices/1234" 1755212000000) (episode "${a}")))`,
 );
 const srcs: any = await run(`(sources "${pf}")`);
-assert(srcs.length === 2, "structured provenance entries returned by (sources)");
+assert(srcs.length === 1, "(sources) returns only EXTERNAL refs (episode refs are internal)");
 assert(print(srcs).includes("postgres") && print(srcs).includes("invoices/1234"),
   "external reference round-trips through the log");
 const provRaw: any = await run(`(provenance "${pf}")`);
@@ -168,6 +168,28 @@ assert(store.get(pf)!.forgotten && store.get(pf)!.text.includes("disputed in mar
 const chain: any = await run(`(history "${rv}")`);
 assert(chain.length === 2 && chain[0][0] === rv && chain[1][0] === pf,
   "(history) walks the supersedes chain newest-first");
+
+console.log("\n— provenance/revise guard rails (review findings) —");
+const expectError = async (src: string, pattern: RegExp, msg: string) => {
+  try {
+    await run(src);
+    assert(false, msg + " (no error thrown)");
+  } catch (e: any) {
+    assert(pattern.test(e.message), `${msg} (${e.message.slice(0, 60)})`);
+  }
+};
+await expectError(`(fact! 42)`, /text must be a string/, "(fact! 42) rejected");
+await expectError(`(fact! "x" "not-a-list")`, /refs must be a list/, "non-list provenance rejected (log cannot be poisoned)");
+await expectError(`(revise! "${rv}")`, /text must be a string/, "(revise! id) without text rejected");
+await expectError(`(revise! "${pf}" "fork attempt")`, /already superseded/, "revising a superseded fact rejected (no forked chains)");
+// A merely-decayed fact MAY be revised — faded beliefs can be revived.
+const decayed = await store.assertFact("old belief that faded away", [], Date.now() - 200 * 24 * 3_600_000);
+store.decay();
+assert(store.get(decayed)!.forgotten, "stale fact decayed");
+const revived = await store.revise(decayed, "the faded belief, revived by new evidence");
+assert(!store.get(revived)!.forgotten, "decayed (not superseded) fact can be revised");
+const backslash = "C:\\new\\inv.txt";
+assert(read(print(backslash)) === backslash, "backslash+n strings round-trip the reader (fold determinism)");
 
 console.log("\n— entity extraction (stub extractor) —");
 const ex1 = await store.remember("met with sarah from globex about the migration project");
@@ -222,6 +244,10 @@ const segClose = () => seg.close();
 for (let i = 0; i < 50; i++) await seg.remember(`filler memory number ${i} about nothing in particular`);
 const compId = await seg.remember("linked companion memory");
 seg.link(keepId, "about", compId);
+// A belief chain that must survive rollover: predecessor is tombstoned by the
+// revise, and rollover must NOT destroy the paper trail (review finding).
+const segFact = await seg.assertFact("vendor balance disputed", [["postgres", "inv/9", 1755212000000]]);
+const segRev = await seg.revise(segFact, "vendor balance resolved and paid");
 // Recall traffic: 10×5 recalled events in the log, which the snapshot
 // compacts into a handful of trace lines — that's the size win.
 for (let i = 0; i < 10; i++) await seg.recall("filler memory", 5);
@@ -235,6 +261,14 @@ assert(fs.statSync(SEGLOG).size < fs.statSync(archives[0]).size, "active snapsho
 assert(seg.stats().episodes === preStats.episodes, "all live episodes survive rollover");
 const segRecall = await seg.recall("database design", 1);
 assert(segRecall[0].id === keepId, "recall works from the snapshot");
+const segChain = seg.history(segRev);
+assert(segChain.length === 2 && segChain[1].id === segFact && segChain[1].forgotten,
+  "belief chain survives rollover: predecessor retained, still tombstoned");
+assert(print(seg.sources(segFact)).includes("inv/9"),
+  "superseded fact's external provenance survives rollover");
+const segRecallRev = await seg.recall("vendor balance", 3);
+assert(segRecallRev.some((r) => r.id === segRev) && !segRecallRev.some((r) => r.id === segFact),
+  "after rollover, recall still surfaces only the chain head");
 seg.close();
 seg = await Store.open(SEGLOG, hashEmbedder); // reopen once more: snapshot refolds cleanly
 assert(seg.get(keepId) !== undefined, "snapshot survives a further restart");
@@ -242,7 +276,8 @@ assert(seg.get(keepId) !== undefined, "snapshot survives a further restart");
 console.log("\n— archive compaction to parquet —");
 let pqAvailable = true;
 try {
-  await import("@dsnp/parquetjs");
+  await import("hyparquet-writer");
+  await import("hyparquet");
 } catch {
   pqAvailable = false;
 }
@@ -250,22 +285,17 @@ if (pqAvailable) {
   const parquets = await seg.compactArchives();
   assert(parquets.length === 1, "archive compacted to one parquet file");
   assert(!fs.existsSync(archives[0]), "original text archive removed after lossless conversion");
-  const pq: any = await import("@dsnp/parquetjs");
-  const reader = await pq.ParquetReader.openFile(parquets[0]);
-  const cursor = reader.getCursor();
-  let rows = 0;
-  let episodeRows = 0;
-  let rawOk = true;
-  for (let row = await cursor.next(); row; row = await cursor.next()) {
-    rows++;
-    if (row.event === "episode") episodeRows++;
-    if (!String(row.raw).startsWith("(")) rawOk = false;
-  }
-  await reader.close();
+  const hp: any = await import("hyparquet");
+  const rows: any[] = await hp.parquetReadObjects({ file: await hp.asyncBufferFromFile(parquets[0]) });
+  const episodeRows = rows.filter((r) => r.event === "episode").length;
+  const reviseRow = rows.find((r) => r.event === "revise");
+  const rawOk = rows.every((r) => String(r.raw).startsWith("("));
   assert(episodeRows >= 52, `parquet holds the archived episodes (${episodeRows} rows)`);
-  assert(rawOk && rows > episodeRows, `raw S-expression column preserved on all ${rows} rows`);
+  assert(rawOk && rows.length > episodeRows, `raw S-expression column preserved on all ${rows.length} rows`);
+  assert(reviseRow && reviseRow.id === segRev && reviseRow.src === segFact,
+    "revise event compacted with successor in id, superseded in src");
 } else {
-  console.log("  (skipped: optional @dsnp/parquetjs not installed)");
+  console.log("  (skipped: optional hyparquet-writer not installed)");
 }
 seg.close();
 segCleanup();
