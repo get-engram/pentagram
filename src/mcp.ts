@@ -175,7 +175,8 @@ const TOOLS = [
     description:
       "Evaluate a pentagram S-expression directly — the full language: " +
       "(recall ...), (remember ...), (replay id), (sleep!), (consolidate!), " +
-      "(extract!), (decay!), (defmacro ...), lambdas, map/filter. " +
+      "(extract!), (decay!), (fact! text refs), (revise! id text refs), " +
+      "(sources id), (history id), (defmacro ...), lambdas, map/filter. " +
       "The agent protocol is the language.",
     inputSchema: {
       type: "object",
@@ -279,7 +280,7 @@ async function handle(req: any): Promise<void> {
         respond({
           protocolVersion: params?.protocolVersion ?? "2025-06-18",
           capabilities: { tools: {} },
-          serverInfo: { name: "pentagram", version: "0.6.1" },
+          serverInfo: { name: "pentagram", version: "0.7.0" },
         });
         break;
       case "ping":

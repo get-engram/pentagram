@@ -40,12 +40,38 @@ export function memoryEnv(store: Store): Env {
     return ep.content;
   });
 
-  // (provenance id) -> for facts, the episode ids it was consolidated from
+  // (provenance id) -> a fact's full evidence list: episode ids and/or
+  // external references, returned as the raw S-expression it was stored as
   def("provenance", (id) => {
     const ep = store.get(String(id));
     if (!ep) throw new Error(`no episode ${id}`);
     return ep.provenance ?? [];
   });
+
+  // (fact! "acme's balance was disputed in march"
+  //        '((postgres "invoices/1234" 1755212000000)))
+  // -> id. A claim WITH POINTERS: the exact value stays in the source system;
+  // recall surfaces the claim, (sources id) gives the address to dereference.
+  def("fact!", (text, refs) => {
+    if (typeof text !== "string") throw new Error("(fact! text refs): text must be a string");
+    if (refs !== undefined && !Array.isArray(refs)) throw new Error("(fact! text refs): refs must be a list");
+    return store.assertFact(text, refs ?? []);
+  });
+
+  // (revise! id "acme's dispute was resolved aug 12" '(refs...)) -> new id.
+  // Supersedes the old belief: hidden from recall, kept in the log forever.
+  def("revise!", (id, text, refs) => {
+    if (typeof text !== "string") throw new Error("(revise! id text refs): text must be a string");
+    if (refs !== undefined && !Array.isArray(refs)) throw new Error("(revise! id text refs): refs must be a list");
+    return store.revise(String(id), text, refs ?? []);
+  });
+
+  // (sources id) -> only the external references in a memory's provenance
+  def("sources", (id) => store.sources(String(id)));
+
+  // (history id) -> the belief chain, newest first, with each belief's
+  // status: ((id ts "text" superseded?) ...)
+  def("history", (id) => store.history(String(id)).map((e) => [e.id, e.ts, e.text, e.forgotten]));
 
   // (entity "acme corp" 'client) -> id. Deduplicated by name+kind: every
   // mention of the same entity converges on one graph node.
